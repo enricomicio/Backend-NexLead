@@ -102,7 +102,7 @@ Se não encontrar um dado e também não for possível estimar, preencha com "n�
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
+      model: "MODEL",
       messages: [{ role: "user", content: prompt }],
     });
 
@@ -112,6 +112,12 @@ Se não encontrar um dado e também não for possível estimar, preencha com "n�
     console.error("Erro ao gerar resposta:", error);
     res.status(500).json({ error: "Erro ao gerar resposta" });
   }
+
+} catch (outerError) {
+    console.error("Erro inesperado na rota /generate:", outerError);
+    return res.status(500).json({ error: "Erro inesperado na rota /generate" });
+  }
+
 });
 
 app.listen(PORT, () => {
