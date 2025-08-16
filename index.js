@@ -102,7 +102,7 @@ Se não encontrar um dado e também não for possível estimar, preencha com "n�
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "MODEL",
+      model: MODEL,
       messages: [{ role: "user", content: prompt }],
     });
 
