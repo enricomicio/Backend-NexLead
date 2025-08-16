@@ -19,7 +19,9 @@ app.post("/generate", async (req, res) => {
   const { site } = req.body;
 
 const prompt = `
-Você é um assistente de inteligência comercial para o segmento de tecnologia (ERP, analíticos, banco de dados, inteligência artificial) de empresas como SAP, Oracle, Totvs, Senior, Omie e semelhantes. Analise o site "${site}" e me responda o seguinte JSON estruturado, com informações extremamente precisas e nada mais:
+
+Se faltar informação, escreva "não encontrado".
+Responda APENAS com um JSON válido (sem markdown, sem texto fora do JSON).
 
 {
   "nomedaempresa": "Razão social",
@@ -102,12 +104,28 @@ Se não encontrar um dado e também não for possível estimar, preencha com "n�
 
   try {
     const completion = await openai.chat.completions.create({
-      model: MODEL,
-      messages: [{ role: "user", content: prompt }],
-    });
+  model: MODEL,
+  messages: [
+    { role: "system", content: "Responda APENAS com um JSON válido (sem markdown, sem texto fora do JSON)." },
+    { role: "user", content: prompt }
+  ],
 
-    const generatedText = completion.choices[0].message.content;
-    res.json({ result: generatedText });
+});
+
+const raw = completion.choices?.[0]?.message?.content || "{}";
+
+const cleaned = raw.replace(/^\s*```json\s*|\s*```\s*$/g, "").trim();
+
+let obj;
+try {
+  obj = JSON.parse(cleaned);         
+} catch (e) {
+  console.error("Modelo não retornou JSON válido:", cleaned.slice(0,200));
+  return res.status(502).json({ error: "Resposta do modelo não é JSON" });
+}
+
+return res.json(obj);               
+
   } catch (error) {
     console.error("Erro ao gerar resposta:", error);
     res.status(500).json({ error: "Erro ao gerar resposta" });
