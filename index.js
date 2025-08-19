@@ -112,8 +112,8 @@ Se não souber algum campo, use "não encontrado".
 O site informado serve só para confirmar o nome correto da empresa.
 `.trim();
 
-// MONTA A REQUISIÇÃO
-const req = {
+
+const oaiReq = {
   model: MODEL,
   tools: USE_WEB ? [{ type: "web_search" }] : [],
   input: [
@@ -124,11 +124,11 @@ const req = {
 
 
 if (!USE_WEB) {
-  req.text = { format: { type: "json_object" } };
+  oaiReq.text = { format: { type: "json_object" } };
 }
 
 
-const response = await openai.responses.create(req);
+const response = await openai.responses.create(oaiReq);
 
 
 let raw = response.output_text || "{}";
