@@ -115,7 +115,7 @@ O site informado serve só para confirmar o nome correto da empresa.
 const response = await openai.responses.create({
   model: MODEL,
   tools: USE_WEB ? [{ type: "web_search" }] : [],
-  text: { format: "json" },                  
+text: { format: { type: "json_object" } }                 
   input: [
     { role: "system", content: systemMsg },
     { role: "user", content: prompt }
