@@ -103,7 +103,6 @@ Se não encontrar um dado e também não for possível estimar, preencha com "n�
 `;
 
 
-  try {
 
 const systemMsg = `
 Use a ferramenta web_search quando precisar de fatos recentes.
@@ -123,7 +122,7 @@ const response = await openai.responses.create({
   ]
 });
 
-// A Responses API expõe o texto final em output_text (deve ser JSON porque pedimos json_object)
+
 const raw = response.output_text || "{}";
 
 let obj;
