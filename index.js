@@ -112,28 +112,44 @@ Se não souber algum campo, use "não encontrado".
 O site informado serve só para confirmar o nome correto da empresa.
 `.trim();
 
-const response = await openai.responses.create({
+// MONTA A REQUISIÇÃO
+const req = {
   model: MODEL,
   tools: USE_WEB ? [{ type: "web_search" }] : [],
-text: { format: { type: "json_object" } } ,                
   input: [
     { role: "system", content: systemMsg },
-    { role: "user", content: prompt }
+    { role: "user",   content: prompt }
   ]
-});
+};
 
 
-const raw = response.output_text || "{}";
+if (!USE_WEB) {
+  req.text = { format: { type: "json_object" } };
+}
+
+
+const response = await openai.responses.create(req);
+
+
+let raw = response.output_text || "{}";
+
 
 let obj;
 try {
-  obj = JSON.parse(raw);                            
-} catch (e) {
-  console.error("Resposta não-JSON:", raw.slice(0, 300));
-  return res.status(502).json({ error: "Modelo não retornou JSON" });
+  obj = JSON.parse(raw);
+} catch (e1) {
+  const cleaned = raw.replace(/^\s*```json\s*|\s*```\s*$/g, "").trim();
+  try {
+    obj = JSON.parse(cleaned);
+  } catch (e2) {
+    console.error("Resposta não-JSON:", raw.slice(0, 300));
+    return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0,300) });
+  }
 }
 
-return res.json(obj);            
+
+return res.json(obj);
+          
 
     
   } catch (error) {
