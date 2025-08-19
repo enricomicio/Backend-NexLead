@@ -13,6 +13,7 @@ const openai = new OpenAI({
 });
 
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o";
+const USE_WEB = (process.env.SEARCH_MODE || "none").toLowerCase() === "web";
 
 app.post("/generate", async (req, res) => {
  try {
@@ -103,37 +104,42 @@ Se não encontrar um dado e também não for possível estimar, preencha com "n�
 
 
   try {
-    const completion = await openai.chat.completions.create({
-  model: MODEL,
-  messages: [
-    { role: "system", content: "Responda APENAS com um JSON válido (sem markdown, sem texto fora do JSON)." },
-    { role: "user", content: prompt }
-  ],
 
+const systemMsg = `
+Use a ferramenta web_search quando precisar de fatos recentes.
+Responda APENAS com um JSON válido (sem markdown). No máximo 2 buscas.
+Para "ultimas5noticias", traga 5 itens { "titulo","data","url","resumo" (<=25 palavras) }.
+Se não souber algum campo, use "não encontrado".
+O site informado serve só para confirmar o nome correto da empresa.
+`.trim();
+
+const response = await openai.responses.create({
+  model: MODEL,
+  tools: USE_WEB ? [{ type: "web_search" }] : [],   
+  response_format: { type: "json_object" },        
+  input: [
+    { role: "system", content: systemMsg },
+    { role: "user", content: prompt }              
+  ]
 });
 
-const raw = completion.choices?.[0]?.message?.content || "{}";
-
-const cleaned = raw.replace(/^\s*```json\s*|\s*```\s*$/g, "").trim();
+// A Responses API expõe o texto final em output_text (deve ser JSON porque pedimos json_object)
+const raw = response.output_text || "{}";
 
 let obj;
 try {
-  obj = JSON.parse(cleaned);         
+  obj = JSON.parse(raw);                            
 } catch (e) {
-  console.error("Modelo não retornou JSON válido:", cleaned.slice(0,200));
-  return res.status(502).json({ error: "Resposta do modelo não é JSON" });
+  console.error("Resposta não-JSON:", raw.slice(0, 300));
+  return res.status(502).json({ error: "Modelo não retornou JSON" });
 }
 
-return res.json(obj);               
+return res.json(obj);            
 
+    
   } catch (error) {
     console.error("Erro ao gerar resposta:", error);
     res.status(500).json({ error: "Erro ao gerar resposta" });
-  }
-
-} catch (outerError) {
-    console.error("Erro inesperado na rota /generate:", outerError);
-    return res.status(500).json({ error: "Erro inesperado na rota /generate" });
   }
 
 });
