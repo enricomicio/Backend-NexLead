@@ -25,28 +25,28 @@ Se faltar informação, escreva "não encontrado".
 Responda APENAS com um JSON válido (sem markdown, sem texto fora do JSON).
 
 {
-  "nomedaempresa": "Razão social",
-  "Cnpj": "CNPJ da Matriz",
-  "Mapa": "link clicavel para a localização da matriz no Brasil via google maps",
-  "telefonepublico": "Telefone principal publico do site",
-  "segmento": "Segmento principal",
-  "Fundação": "Ano de fundaçao",
-  "Subsegmento": "Subsegmento",
-  "criteriofiscal": "Critério usado para indicar a solução fiscal atual da empresa",
-  "Funcionarios": "Numero ou estimativa de funcionários da empresa",
-  "Faturamento": "Faturamento anual atual ou estimado com base em porte, segmento, presença e funcionários",
-  "Localização": "Estado da matriz",
-  "erpatualouprovavel": "ERP atual ou estimado com base em dados públicos ou inferência por perfil",
-  "justificativaERP": "Critério utilizado para indicação do ERP", 
-  "solucaofiscalouprovavel": "Solução fiscal atual ou estimada com base no perfil, porte, segmento",
-  "principaldordonegocio": "Maior desafio do negócio segundo seu perfil",
-  "investimentoemti": "Estimativa anual de investimento em TI, e o critério utilizado para chegar a esse numero",
-  "ofensoremti": "Principal barreira interna para investimentos em TI",
-  "modelodeemailti": "Email Open-Door para o CIO com base em perfil e dores",
-  "modelodeemailfinanceiro": "Email Open-Door para CFO com foco financeiro e eficiência",
-  "ultimas5noticias": "Preciso que voce coloque as 5 ultimas noticias altamente relevantes que indiquem que essa empresa esta crescendo e precisara investir em tecnologia para sustentar esse crescimento. Preciso que voce coloque apenas o resumo da noticia em no máximo 25 palavras, e a data dela. Essas noticias precisam ser clicáveis, ou seja, clicando voce é direcionado para a noticia completa",
-  "Compelling": "Fator (compelling) que mais motivaria investimento em tecnologia",
-  "gatilhocomercial": "Gatilho comercial mais relevante para abordagem",  
+  "nomedaempresa",
+  "Cnpj",
+  "Mapa",
+  "telefonepublico",
+  "segmento",
+  "Fundação",
+  "Subsegmento",
+  "criteriofiscal",
+  "Funcionarios",
+  "Faturamento",
+  "Localização",
+  "erpatualouprovavel",
+  "justificativaERP",
+  "solucaofiscalouprovavel",
+  "principaldordonegocio",
+  "investimentoemti",
+  "ofensoremti",
+  "modelodeemailti",
+  "modelodeemailfinanceiro",
+  "ultimas5noticias",
+  "Compelling",
+  "gatilhocomercial" ,
   "site": "${site}",
 "organogramaclevel": [
   { 
@@ -99,7 +99,7 @@ Responda APENAS com um JSON válido (sem markdown, sem texto fora do JSON).
 
 }
 
-Se não encontrar um dado e também não for possível estimar, preencha com "não encontrado".
+
 `;
 
 
