@@ -124,7 +124,7 @@ PRIORIDADE (nesta ordem):
 4) Demais campos:
    - ESTIMÁVEIS: "Funcionarios", "Faturamento", "erpatualouprovavel", "solucaofiscalouprovavel", "investimentoemti".
      Quando não houver fonte direta, ESTIME com critério explícito (porte, setor, presença geográfica, maturidade digital, headcount público — ex. LinkedIn, benchmarks).
-     Explique o critério em "justificativaERP", "criteriofiscal" e dentro de "investimentoemti" (valor + critério).
+     Explique o critério em "justificativaERP", "criteriofiscal" e dentro de "investimentoemti" (deve ser UMA STRING no formato: R$ X – Critério:...  Nunca retorne objeto aqui).
    - NÃO-ESTIMÁVEIS (da etapa 2): se, mesmo após usar seu orçamento de chamadas, não localizar valor confiável, NÃO use “não encontrado”.
      Em vez disso, retorne "em verificação" nesse campo.
 5) Dados comerciais (estimáveis):
@@ -142,6 +142,8 @@ REGRAS DE SAÍDA:
 - Campos ESTIMÁVEIS: valor real OU estimado com critério explícito (nunca vazio).
 - Arrays SEMPRE como arrays (mesmo que vazios): "ultimas5noticias", "organogramaclevel", "powermap".
 - Datas AAAA-MM-DD. Português do Brasil. Responda somente com o JSON final.
+
+
 
 `.trim();
 
