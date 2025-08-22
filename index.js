@@ -115,6 +115,21 @@ REGRAS DE SAÍDA (TIPOS E FORMATO)
     - "organogramaclevel": [{ "nome","Cargo" }]
     - "powermap": [{ "nome","cargo","classificacao","justificativa" }]
 - Datas AAAA-MM-DD. 
+E-MAILS (campos "modelodeemailti" e "modelodeemailfinanceiro"):
+- DEVEM conter o TEXTO COMPLETO do e-mail, em português do Brasil.
+- Formato exato (uma STRING): 
+  "ASSUNTO: <linha de assunto>"
+  (linha em branco)
+  "<corpo do email em 2–4 parágrafos curtos (120–180 palavras)>"
+  (linha em branco)
+  "Atenciosamente,
+  Equipe NexLead"
+- Personalize com o nome da empresa (use "nomedaempresa"). Se não souber o nome da pessoa, use "CIO da {nomedaempresa}" e "CFO da {nomedaempresa}".
+- Proibido: endereços de e-mail (ex.: ti@cliente.com.br), placeholders <NOME>, markdown, bullets.
+- O e-mail para CIO deve focar em arquitetura/integração, confiabilidade, escalabilidade, roadmap e riscos técnicos.
+- O e-mail para CFO deve focar em ROI, TCO, eficiência operacional, compliance e risco financeiro.
+- Inclua um CTA claro para uma conversa de 20 minutos nesta semana.
+
 - Saída: SOMENTE o JSON final.
 
 
