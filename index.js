@@ -21,87 +21,47 @@ app.post("/generate", async (req, res) => {
 
 const prompt = `
 
-Se faltar informação, escreva "não encontrado".
-Responda APENAS com um JSON válido (sem markdown, sem texto fora do JSON).
+Site informado: ${site}
+
+Preencha exatamente este JSON (mantenha os tipos de cada campo):
 
 {
-  "nomedaempresa",
-  "Cnpj",
-  "Mapa",
-  "telefonepublico",
-  "segmento",
-  "Fundação",
-  "Subsegmento",
-  "criteriofiscal",
-  "Funcionarios",
-  "Faturamento",
-  "Localização",
-  "erpatualouprovavel",
-  "justificativaERP",
-  "solucaofiscalouprovavel",
-  "principaldordonegocio",
-  "investimentoemti",
-  "ofensoremti",
-  "modelodeemailti",
-  "modelodeemailfinanceiro",
-  "ultimas5noticias",
-  "Compelling",
-  "gatilhocomercial" ,
+  "nomedaempresa": "",
+  "Cnpj": "",
+  "Mapa": "",
+  "telefonepublico": "",
+  "segmento": "",
+  "Fundação": "",
+  "Subsegmento": "",
+  "criteriofiscal": "",
+  "Funcionarios": "",
+  "Faturamento": "",
+  "Localização": "",
+  "erpatualouprovavel": "",
+  "justificativaERP": "",
+  "solucaofiscalouprovavel": "",
+  "principaldordonegocio": "",
+  "investimentoemti": "",
+  "ofensoremti": "",
+  "modelodeemailti": "",
+  "modelodeemailfinanceiro": "",
+  "ultimas5noticias": [],
+  "Compelling": "",
+  "gatilhocomercial": "",
   "site": "${site}",
-"organogramaclevel": [
-  { 
-  "nome": "Nome do CEO da empresa",
-  "Cargo": "CEO"
- },
-  { 
-  "nome": "Nome do CFO da empresa",
-  "Cargo": "CFO"
- },
-  { 
-  "nome": "Nome do CTO da empresa",
-  "Cargo": "CTO"
- },
-  { 
-  "nome": "Nome do COO da empresa",
-  "Cargo": "COO"
- }
-],
-
-
-
-
-"powermap": [
-  {
-    "nome": "Nome do decisor final em TI",
-    "cargo": "Cargo do decisor",
-    "classificacao": "Decisor", 
-    "justificativa": "Por que é o decisor"
-  },
-{
-    "nome": "Nome do influenciador em TI",
-    "cargo": "Cargo do influenciador",
-    "classificacao": "Influenciador", 
-    "justificativa": "Por que ele é o influenciador"
-  },
-{
-    "nome": "Nome da barreira",
-    "cargo": "Cargo da barreira",
-    "classificacao": "Barreira", 
-    "justificativa": "Por que essa pessoa é considerada uma barreira para investimento em TI"
+  "organogramaclevel": [
+    { "nome": "", "Cargo": "CEO" },
+    { "nome": "", "Cargo": "CFO" },
+    { "nome": "", "Cargo": "CTO" },
+    { "nome": "", "Cargo": "COO" }
+  ],
+  "powermap": [
+    { "nome": "", "cargo": "", "classificacao": "Decisor", "justificativa": "" },
+    { "nome": "", "cargo": "", "classificacao": "Influenciador", "justificativa": "" },
+    { "nome": "", "cargo": "", "classificacao": "Barreira", "justificativa": "" }
+  ]
 }
-],
-
-
-
-
-
-
-
-}
-
-
-`;
-
+`.trim();
 
 
 const systemMsg = `
