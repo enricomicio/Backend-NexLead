@@ -84,9 +84,17 @@ ORDEM DE TRABALHO (pare quando TODOS os NÃO-ESTIMÁVEIS estiverem preenchidos)
    Fontes preferidas: site institucional e páginas oficiais; em seguida, Google Maps (perfil da empresa), mídia/portais confiáveis. 
    Não use “em verificação” enquanto houver orçamento e resultados relevantes a abrir.
 3) "ultimas5noticias": montar 5 itens (até 24 meses) sobre crescimento/expansão, cada item = { "titulo", "data"(AAAA-MM-DD), "url", "resumo"(≤25 palavras) }.
-4) CAMPOS ESTIMÁVEIS (quando não houver fonte direta): Funcionarios, Faturamento, erpatualouprovavel, solucaofiscalouprovavel, investimentoemti. 
+4) CAMPOS ESTIMÁVEIS (quando não houver fonte direta): funcionarios, faturamento, erpatualouprovavel, solucaofiscalouprovavel, investimentoemti. 
    Estime com critério explícito (porte, setor, presença geográfica, maturidade digital, headcount público/LinkedIn, benchmarks). 
    Registre o critério em "justificativaERP", "criteriofiscal" e em "investimentoemti" (STRING no formato: “R$ X – Critério: ...”).
+   Campo "investimentoemti": Se houver benchmark setorial confiável, use-o (cite o critério). Caso contrário, use 2% do Faturamento estimado ou encontrado. Ex.: “R$ 100 mi/ano – Critério: 2% de R$ 100 mi, que seria R$ 2 mi de investimento anual em TI (bench genérico)”.
+   Campo "faturamento": Se houver valor confiável (relatório anual, imprensa, cadastro público), retorne “R$ X/ano (AAAA) – fonte: …”. Se NÃO houver fonte direta: ESTIME com critério explícito. Use uma ou mais heurísticas: (a) Funcionários × receita/func do setor, (b) notícias com faixa de receita, (c) comparação com pares do mesmo porte/segmento/local.
+   Campo "solucaofiscalouprovavel": Escolha entre { Thomson Reuters, Sovos, Solutio, Avalara, Guepardo, 4Tax, BPO fiscal, planilhas/house } com base em porte/ERP/segmento/custo/pesquisas na internet; explique em “criteriofiscal”.
+   Campo "erpatualouprovavel": escolha entre { SAP S/4HANA, SAP ECC, SAP Business One, Oracle NetSuite, TOTVS Protheus, Senior, Sankhya, Omie, “desenvolvimento próprio”, “outro ERP de nicho” } com base em porte/complexidade/segmento/ecossistema do país/noticias/pesquisa na internet; explique em “justificativaERP”.
+   Campo "ofensoremti": principal “pedra no sapato” interna para NÃO investir em TI (ex.: congelamento orçamentário, dívida técnica crítica, backlog, compliance/risco, prioridade em core, restrição de CAPEX/OPEX). 1 frase curta.
+   Campo "Compelling": razão convincente, orientada a resultado (ROI, risco evitado, eficiência, prazo regulatório etc.) que cria urgência. 1–2 frases, ligada às notícias/dor/faturamento atual. 
+
+
 
 COMO BUSCAR (padrões de consulta e inspeção de página)
 - Para telefone/contato no SITE: 
@@ -115,19 +123,15 @@ REGRAS DE SAÍDA (TIPOS E FORMATO)
     - "organogramaclevel": [{ "nome","Cargo" }]
     - "powermap": [{ "nome","cargo","classificacao","justificativa" }]
 - Datas AAAA-MM-DD. 
-E-MAILS (campos "modelodeemailti" e "modelodeemailfinanceiro"):
-- DEVEM conter o TEXTO COMPLETO do e-mail, em português do Brasil.
-- Formato exato (uma STRING): 
-  "ASSUNTO: <linha de assunto>"
-  (linha em branco)
-  "<corpo do email em 2–4 parágrafos curtos (120–180 palavras)>"
-  (linha em branco)
+E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
+  "ASSUNTO: <linha>"
+  <linha em branco>
+  <corpo 2–4 parágrafos, 120–180 palavras, personalizado com nomedaempresa/segmento/notícias/compelling/dor>
+  <linha em branco>
   "Atenciosamente,
-  Equipe NexLead"
-- Personalize com o nome da empresa (use "nomedaempresa"). Se não souber o nome da pessoa, use "CIO da {nomedaempresa}" e "CFO da {nomedaempresa}".
-- Proibido: endereços de e-mail (ex.: ti@cliente.com.br), placeholders <NOME>, markdown, bullets.
-- O e-mail para CIO deve focar em arquitetura/integração, confiabilidade, escalabilidade, roadmap e riscos técnicos.
-- O e-mail para CFO deve focar em ROI, TCO, eficiência operacional, compliance e risco financeiro.
+  [Seu Nome]
+  [Seu Telefone]"
+- Saída: SOMENTE o JSON final.
 - Inclua um CTA claro para uma conversa de 20 minutos nesta semana.
 
 - Saída: SOMENTE o JSON final.
