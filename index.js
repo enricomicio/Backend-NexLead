@@ -25,6 +25,11 @@ Site informado: ${site}
 Preencha exatamente este JSON (mantenha os tipos de cada campo).
 Atenção: Inicie a resposta com "{" e termine com "}". Não escreva nada fora do JSON.
 
+Regras específicas para alguns campos:
+- "mapa": retorne PREFERENCIALMENTE uma URL do Google Maps da matriz. Se só tiver o endereço, tudo bem (o backend transformará em link).
+- "telefonepublico": se não estiver no site institucional, pode usar o telefone do perfil oficial no Google Maps.
+- "ultimas5noticias": retorne 5 itens (até 24 meses), cada um com { "titulo", "data"(AAAA-MM-DD), "url", "resumo"(≤25 palavras) }.
+
 {
   "nomedaempresa": "",
   "cnpj": "",
@@ -76,7 +81,7 @@ ORDEM DE TRABALHO (pare quando TODOS os NÃO-ESTIMÁVEIS estiverem preenchidos)
 2) PREENCHER FACTUAIS (NÃO-ESTIMÁVEIS): 
    • Cnpj (MATRIZ)
    • telefonepublico (telefone que consta no site institucional; se não houver no site, use o telefone do Perfil da Empresa no Google Maps)
-   • Mapa (URL clicável do Google Maps da MATRIZ)
+   • Mapa (URL do Google Maps da MATRIZ)
    • Localização (UF da matriz)
    • segmento e Subsegmento
    • Fundação (ano)
@@ -87,60 +92,23 @@ ORDEM DE TRABALHO (pare quando TODOS os NÃO-ESTIMÁVEIS estiverem preenchidos)
    Estime com critério explícito (porte, setor, presença geográfica, maturidade digital, headcount público/LinkedIn, benchmarks). 
    Registre o critério em "justificativaERP", "criteriofiscal" e em "investimentoemti" (STRING no formato: “R$ X – Critério: ...”).
    Campo "investimentoemti": Se houver benchmark setorial confiável, use-o (cite o critério). Caso contrário, use 2% do Faturamento estimado ou encontrado. Ex.: “R$ 100 mi/ano – Critério: 2% de R$ 100 mi, que seria R$ 2 mi de investimento anual em TI (bench genérico)”.
-   Campo "faturamento": Se houver valor confiável (relatório anual, imprensa, cadastro público), retorne “R$ X/ano (AAAA) – fonte: …”. Se NÃO houver fonte direta: ESTIME com critério explícito. Use uma ou mais heurísticas: (a) Funcionários × receita/func do setor, (b) notícias com faixa de receita, (c) comparação com pares do mesmo porte/segmento/local.
+   Campo "faturamento": Se houver valor confiável (relatório anual, imprensa, cadastro público), retorne “R$ X/ano (AAAA) – fonte: …”. Se NÃO houver fonte direta: ESTIME com critério explícito. Use uma ou mais heurísticas: (a) Funcionários × receita/func do setor, (b) notícias com faixa de receita, (c) comparação com pares do mesmo porte/segmento/local).
    Campo "solucaofiscalouprovavel": Escolha entre { Thomson Reuters, Sovos, Solutio, Avalara, Guepardo, 4Tax, BPO fiscal, planilhas/house } com base em porte/ERP/segmento/custo/pesquisas na internet; explique em “criteriofiscal”.
    Campo "erpatualouprovavel": escolha entre { SAP S/4HANA, SAP ECC, SAP Business One, Oracle NetSuite, TOTVS Protheus, Senior, Sankhya, Omie, “desenvolvimento próprio”, “outro ERP de nicho” } com base em porte/complexidade/segmento/ecossistema do país/noticias/pesquisa na internet; explique em “justificativaERP”.
    Campo "ofensoremti": principal “pedra no sapato” interna para NÃO investir em TI (ex.: congelamento orçamentário, dívida técnica crítica, backlog, compliance/risco, prioridade em core, restrição de CAPEX/OPEX). 1 frase curta.
    Campo "Compelling": razão convincente, orientada a resultado (ROI, risco evitado, eficiência, prazo regulatório etc.) que cria urgência. 1–2 frases, ligada às notícias/dor/faturamento atual. 
 
-
-
-COMO BUSCAR (padrões de consulta e inspeção de página)
-- Para telefone/contato no SITE: 
-  search: "site:{domínio} (contato OR 'fale conosco' OR atendimento OR telefone OR contato telefone)"
-  Dentro da página aberta, procure por: "telefone", "tel", "contato", "atendimento", "sac".
-- Para CNPJ:
-  search: "site:{domínio} (CNPJ OR 'dados legais' OR 'política de privacidade')"
-  Se não achar no site, search: "CNPJ \"{razão social}\" matriz"
-  Confirme por consistência de razão social e endereço.
-- Para Mapa (MATRIZ):
-  search: "site:google.com/maps {razão social} {cidade/UF}" 
-  Pegue a URL do perfil oficial da empresa; evite agregadores de mapas de terceiros.
-- Para Segmento/Subsegmento/Fundação:
-  search: "site:{domínio} (sobre OR 'quem somos' OR história OR institucional)"
-- Para notícias:
-  search: "{razão social} investimentos OR expansão OR contratações OR aquisição OR 'novo mercado'"
-
 REGRAS DE SAÍDA (TIPOS E FORMATO)
-- Nunca escreva "não encontrado".
-- Campos NÃO-ESTIMÁVEIS: valor real encontrado OU, somente após esgotar o orçamento, "em verificação".
-- Campos ESTIMÁVEIS: valor real OU valor estimado com critério (nunca vazio).
-- Tipos obrigatórios:
-  • STRING (nunca objeto): "nomedaempresa","Cnpj","Mapa","telefonepublico","segmento","Fundação","Subsegmento","criteriofiscal","Funcionarios","Faturamento","Localização","erpatualouprovavel","justificativaERP","solucaofiscalouprovavel","principaldordonegocio","investimentoemti","ofensoremti","modelodeemailti","modelodeemailfinanceiro","Compelling","gatilhocomercial","site".
-  • ARRAYS de objetos: 
-    - "ultimas5noticias": [{ "titulo","data","url","resumo" }]
-    - "organogramaclevel": [{ "nome","Cargo" }]
-    - "powermap": [{ "nome","cargo","classificacao","justificativa" }]
+- Saída: SOMENTE o JSON final (um único objeto). Comece com "{" e termine com "}".
 - Datas AAAA-MM-DD. 
-E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
-  "ASSUNTO: <linha>"
-  <linha em branco>
-  <corpo 2–4 parágrafos, 120–180 palavras, personalizado com nomedaempresa/segmento/notícias/compelling/dor>
-  <linha em branco>
-  "Atenciosamente,
-  [Seu Nome]
-  [Seu Telefone]"
-- Saída: SOMENTE o JSON final.
-- Inclua um CTA claro para uma conversa de 20 minutos nesta semana.
-
-- Saída: SOMENTE o JSON final.
+- E-mails: texto completo conforme modelo especificado.
 `.trim();
 
-    // === Chamada principal (igual ao fluxo original) ===
+    // === Chamada principal (igual ao que funcionava) ===
     const oaiReq = {
       model: MODEL,
       tools: USE_WEB ? [{ type: "web_search" }] : [],
-      tool_choice: USE_WEB ? "auto" : "none", // deixa a ferramenta disponível (auto)
+      tool_choice: USE_WEB ? "auto" : "none",
       input: [
         { role: "system", content: systemMsg },
         { role: "user",   content: prompt }
@@ -158,7 +126,7 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
     // ===================== PARSE ROBUSTO + FALLBACK “LOSSLESS” =====================
     const raw = response.output_text || "";
 
-    // helpers enxutos
+    // helpers
     const stripFences = s => String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
     const normalizeQuotes = s => String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
     const tryParse = s => { try { return JSON.parse(s); } catch { return null; } };
@@ -201,8 +169,7 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
       jsonStr = repaired;
     }
 
-    // 4) fallback final: reformatar em JSON usando JSON mode (SEM web_search),
-    //    PRESERVANDO 100% DO CONTEÚDO (lossless)
+    // 4) fallback final: reformatar em JSON usando JSON mode (SEM web_search), preservando conteúdo
     if (!obj) {
       try {
         const rehab = await openai.responses.create({
@@ -232,7 +199,59 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
         return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0, 500) });
       }
     }
-    // ===================== FIM DO PARSE ROBUSTO + FALLBACK =====================
+    // ===================== FIM DO PARSE ROBUSTO =====================
+
+    // ===================== PÓS-PROCESSAMENTOS CIRÚRGICOS =====================
+    // 1) Garantir que "mapa" seja URL do Google Maps
+    const toMapsUrl = (query) =>
+      `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+
+    const loc = obj["localização"] || obj.localização || obj.localizacao || "";
+    if (!obj.mapa || !/^https?:\/\//i.test(obj.mapa)) {
+      const baseQuery =
+        (obj.mapa && obj.mapa.trim()) ||
+        [obj.nomedaempresa, loc].filter(Boolean).join(", ");
+      if (baseQuery) obj.mapa = toMapsUrl(baseQuery);
+    }
+
+    // 2) Garantir e-mails preenchidos (fallback local ~150 palavras)
+    const needTI = !obj.modelodeemailti || obj.modelodeemailti.trim().length < 80;
+    const needCFO = !obj.modelodeemailfinanceiro || obj.modelodeemailfinanceiro.trim().length < 80;
+
+    const empresa = obj.nomedaempresa || "sua empresa";
+    const segmento = obj.segmento || "seu segmento";
+    const dor = obj.principaldordonegocio || "redução de custos, riscos e ineficiências";
+    const compelling = obj.Compelling || "potencial de ROI, eficiência operacional e conformidade";
+
+    const genEmail = (alvo) => {
+      const assunto =
+        alvo === "TI"
+          ? `Alinhamento rápido sobre ganhos em TI (${empresa})`
+          : `Otimização de OPEX/TCO em ${empresa}`;
+      const foco =
+        alvo === "TI"
+          ? "arquitetura, integração e confiabilidade"
+          : "viabilidade financeira, TCO e impacto no EBITDA";
+      return (
+`ASSUNTO: ${assunto}
+
+Olá,
+
+Sou [Seu Nome] e trabalho com iniciativas para acelerar resultados em empresas do segmento de ${segmento}. Analisando o cenário da ${empresa}, identifiquei oportunidades ligadas a ${dor}, com ${compelling}. Nossa abordagem é pragmática e orientada a metas de curto prazo, sem projetos intermináveis.
+
+Em uma conversa de 20 minutos, posso compartilhar benchmarks e um esboço de iniciativa com foco em ${foco}, incluindo estimativas de payback e próximos passos. Se fizer sentido, avançamos para um estudo mais detalhado; se não, você já sai com referências úteis para o planejamento.
+
+Tem agenda esta semana para um bate-papo rápido (20 min)? Posso adaptar ao melhor horário.
+
+Atenciosamente,
+[Seu Nome]
+[Seu Telefone]`
+      );
+    };
+
+    if (needTI)  obj.modelodeemailti = genEmail("TI");
+    if (needCFO) obj.modelodeemailfinanceiro = genEmail("CFO");
+    // =================== FIM PÓS-PROCESSAMENTOS ===================
 
     return res.json(obj);
 
