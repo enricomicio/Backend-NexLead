@@ -16,10 +16,11 @@ const MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 const USE_WEB = (process.env.SEARCH_MODE || "none").toLowerCase() === "web";
 
 app.post("/generate", async (req, res) => {
-  try {
-    const { site } = req.body;
+ try {
+  const { site } = req.body;
 
-    const prompt = `
+const prompt = `
+
 Site informado: ${site}
 
 Preencha exatamente este JSON (mantenha os tipos de cada campo):
@@ -62,7 +63,8 @@ Preencha exatamente este JSON (mantenha os tipos de cada campo):
 }
 `.trim();
 
-    const systemMsg = `
+
+const systemMsg = `
 Você é um agente que produz APENAS JSON válido (sem markdown nem comentários).
 Você PODE usar web_search sempre que precisar de informação externa.
 
@@ -91,6 +93,8 @@ ORDEM DE TRABALHO (pare quando TODOS os NÃO-ESTIMÁVEIS estiverem preenchidos)
    Campo "erpatualouprovavel": escolha entre { SAP S/4HANA, SAP ECC, SAP Business One, Oracle NetSuite, TOTVS Protheus, Senior, Sankhya, Omie, “desenvolvimento próprio”, “outro ERP de nicho” } com base em porte/complexidade/segmento/ecossistema do país/noticias/pesquisa na internet; explique em “justificativaERP”.
    Campo "ofensoremti": principal “pedra no sapato” interna para NÃO investir em TI (ex.: congelamento orçamentário, dívida técnica crítica, backlog, compliance/risco, prioridade em core, restrição de CAPEX/OPEX). 1 frase curta.
    Campo "Compelling": razão convincente, orientada a resultado (ROI, risco evitado, eficiência, prazo regulatório etc.) que cria urgência. 1–2 frases, ligada às notícias/dor/faturamento atual. 
+
+
 
 COMO BUSCAR (padrões de consulta e inspeção de página)
 - Para telefone/contato no SITE: 
@@ -131,45 +135,57 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
 - Inclua um CTA claro para uma conversa de 20 minutos nesta semana.
 
 - Saída: SOMENTE o JSON final.
+
+
+
+
 `.trim();
 
+
 const oaiReq = {
-      model: MODEL,
-      tools: USE_WEB ? [{ type: "web_search" }] : [],
-      input: [
-        { role: "system", content: systemMsg },
-        { role: "user",   content: prompt }
-      ]
-    };
+  model: MODEL,
+  tools: USE_WEB ? [{ type: "web_search" }] : [],
+  input: [
+    { role: "system", content: systemMsg },
+    { role: "user",   content: prompt }
+  ]
+};
 
-    // JSON mode só quando NÃO estiver usando web_search (limitação da API)
-    if (!USE_WEB) {
-      oaiReq.text = { format: { type: "json_object" } };
-    }
 
-    const response = await openai.responses.create(oaiReq);
+if (!USE_WEB) {
+  oaiReq.text = { format: { type: "json_object" } };
+}
 
-    let raw = response.output_text || "{}";
 
-    let obj;
-    try {
-      obj = JSON.parse(raw);
-    } catch (e1) {
-      const cleaned = raw.replace(/^\s*```json\s*|\s*```\s*$/g, "").trim();
-      try {
-        obj = JSON.parse(cleaned);
-      } catch (e2) {
-        console.error("Resposta não-JSON:", raw.slice(0, 300));
-        return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0,300) });
-      }
-    }
+const response = await openai.responses.create(oaiReq);
 
-    return res.json(obj);
 
+let raw = response.output_text || "{}";
+
+
+let obj;
+try {
+  obj = JSON.parse(raw);
+} catch (e1) {
+  const cleaned = raw.replace(/^\s*```json\s*|\s*```\s*$/g, "").trim();
+  try {
+    obj = JSON.parse(cleaned);
+  } catch (e2) {
+    console.error("Resposta não-JSON:", raw.slice(0, 300));
+    return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0,300) });
+  }
+}
+
+
+return res.json(obj);
+          
+
+    
   } catch (error) {
     console.error("Erro ao gerar resposta:", error);
     res.status(500).json({ error: "Erro ao gerar resposta" });
   }
+
 });
 
 app.listen(PORT, () => {
