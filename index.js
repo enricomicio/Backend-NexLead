@@ -125,11 +125,14 @@ REGRAS DE SAÍDA (TIPOS E FORMATO)
   // chamada ao OpenAI com timeout controlado (substitui a linha única)
 let response;
 try {
-  const ac = new AbortController();               // Node 18+ tem AbortController global
+  const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    response = await openai.responses.create({ ...oaiReq, signal: ac.signal });
+    response = await openai.responses.create(oaiReq, {
+      signal: ac.signal,
+      timeout: REQUEST_TIMEOUT_MS + 1000
+    });
   } finally {
     clearTimeout(timer);
   }
