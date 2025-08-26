@@ -148,26 +148,20 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
       input: [
         { role: "system", content: systemMsg },
         { role: "user",   content: prompt }
-      ],
-      // ↑ segue seu formato original (Responses API com input role/content)
-      // 1) mais tokens de saída p/ evitar truncamento do JSON
-      max_output_tokens: 2000,
+      ]
+      // ⬆️ Nada de JSON mode aqui; tudo igual ao que você já usava
     };
 
-    // JSON mode SÓ quando NÃO estiver usando web_search (limitação da API)
-    if (!USE_WEB) {
-      oaiReq.text = { format: { type: "json_object" } };
-    }
-
     const response = await openai.responses.create(oaiReq);
+
     const raw = response.output_text || "";
 
-    // ===== Helpers mínimos p/ parse robusto =====
-    const normalizeSmartQuotes = (s) =>
-      String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
-
-    const stripCodeFences = (s) =>
+    // ====== ÚNICO ACRÉSCIMO: parser robusto para extrair o 1º objeto JSON ======
+    const stripFences = (s) =>
       String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
+
+    const normalizeQuotes = (s) =>
+      String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
 
     const extractFirstJsonObject = (s) => {
       if (!s) return null;
@@ -190,74 +184,29 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
           }
         }
       }
-      return null; // não achou fechamento
+      return null; // não achou fechamento -> manteremos o fallback antigo
     };
 
     const tryParse = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
-    // ===== 1ª tentativa: limpar e extrair o 1º objeto JSON balanceado =====
-    let cleaned = normalizeSmartQuotes(stripCodeFences(raw));
+    // limpa cercas/aspas, extrai só o objeto
+    let cleaned = normalizeQuotes(stripFences(raw));
     let jsonStr = extractFirstJsonObject(cleaned) || cleaned;
 
-    // tentativa A
+    // tenta parse direto
     let obj = tryParse(jsonStr);
 
-    // tentativa B: reparar vírgula antes de } ou ]
+    // seu fallback antigo (remove cercas; mantém comportamento anterior)
     if (!obj) {
-      const repaired = jsonStr.replace(/,\s*([}\]])/g, "$1");
-      obj = tryParse(repaired);
-      jsonStr = repaired;
+      const cleanedOld = raw.replace(/^\s*```json\s*|\s*```\s*$/g, "").trim();
+      obj = tryParse(cleanedOld);
     }
 
-    // tentativa C: se havia outro objeto mais adiante, tentar próximo
     if (!obj) {
-      let from = cleaned.indexOf("{", (cleaned.indexOf(jsonStr) + jsonStr.length) || 0);
-      while (!obj && from >= 0) {
-        const candidate = extractFirstJsonObject(cleaned.slice(from));
-        if (!candidate) break;
-        obj = tryParse(candidate) || tryParse(candidate.replace(/,\s*([}\]])/g, "$1"));
-        from = cleaned.indexOf("{", from + 1);
-      }
+      console.error("Resposta não-JSON:", raw.slice(0, 300));
+      return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0,300) });
     }
 
-    // ===== Fallback final: reformatar em JSON com JSON mode (sem web_search) =====
-    if (!obj) {
-      const rehabReq = {
-        model: MODEL,
-        input: [
-          { role: "system",
-            content:
-              "Converta o conteúdo a seguir em um ÚNICO objeto JSON válido. " +
-              "Responda SOMENTE com o objeto JSON (sem markdown, sem texto fora do {}). " +
-              "Se houver erros de formatação, corrija; se faltar fechamento, feche corretamente."
-          },
-          { role: "user", content: raw }
-        ],
-        text: { format: { type: "json_object" } }, // JSON mode permitido aqui (sem web_search)
-        max_output_tokens: 2000,
-        temperature: 0,
-      };
-
-      try {
-        const rehab = await openai.responses.create(rehabReq);
-        const fixed = rehab.output_text || "{}";
-        const fixedObj = tryParse(fixed);
-        if (!fixedObj) {
-          console.error("Resposta não-JSON (fallback) trecho:", fixed.slice(0, 500));
-          return res
-            .status(502)
-            .json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0, 500) });
-        }
-        return res.json(fixedObj);
-      } catch (rehabErr) {
-        console.error("Falha no fallback de reformatar JSON:", rehabErr?.message || rehabErr);
-        return res
-          .status(502)
-          .json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0, 500) });
-      }
-    }
-
-    // sucesso na etapa principal
     return res.json(obj);
 
   } catch (error) {
@@ -265,7 +214,6 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
     res.status(500).json({ error: "Erro ao gerar resposta" });
   }
 });
-
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
