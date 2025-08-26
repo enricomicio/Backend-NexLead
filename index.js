@@ -133,16 +133,15 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
 - Saída: SOMENTE o JSON final.
 `.trim();
 
-    const oaiReq = {
-      model: MODEL,
-      tools: USE_WEB ? [{ type: "web_search" }] : [],
-      response_format: { type: "json_object" },   // <--- JSON MODE LIGADO
-      temperature: 0,                              // formato mais estável
-      input: [
-        { role: "system", content: systemMsg },
-        { role: "user",   content: prompt }
-      ]
-    };
+const oaiReq = {
+  model: MODEL,
+  tools: USE_WEB ? [{ type: "web_search" }] : [],
+  input: [
+    { role: "system", content: systemMsg },
+    { role: "user",   content: prompt }
+  ],
+  response_format: { type: "json_object" } 
+};
 
     const response = await openai.responses.create(oaiReq);
 
