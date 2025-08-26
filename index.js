@@ -142,50 +142,128 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
 `.trim();
 
 
-const oaiReq = {
-  model: MODEL,
-  tools: USE_WEB ? [{ type: "web_search" }] : [],
-  input: [
-    { role: "system", content: systemMsg },
-    { role: "user",   content: prompt }
-  ]
-};
+    const oaiReq = {
+      model: MODEL,
+      tools: USE_WEB ? [{ type: "web_search" }] : [],
+      input: [
+        { role: "system", content: systemMsg },
+        { role: "user",   content: prompt }
+      ],
+      // ↑ segue seu formato original (Responses API com input role/content)
+      // 1) mais tokens de saída p/ evitar truncamento do JSON
+      max_output_tokens: 2000,
+    };
 
+    // JSON mode SÓ quando NÃO estiver usando web_search (limitação da API)
+    if (!USE_WEB) {
+      oaiReq.text = { format: { type: "json_object" } };
+    }
 
-if (!USE_WEB) {
-  oaiReq.text = { format: { type: "json_object" } };
-}
+    const response = await openai.responses.create(oaiReq);
+    const raw = response.output_text || "";
 
+    // ===== Helpers mínimos p/ parse robusto =====
+    const normalizeSmartQuotes = (s) =>
+      String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
 
-const response = await openai.responses.create(oaiReq);
+    const stripCodeFences = (s) =>
+      String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
 
+    const extractFirstJsonObject = (s) => {
+      if (!s) return null;
+      const text = String(s);
+      const start = text.indexOf("{");
+      if (start < 0) return null;
+      let depth = 0, inStr = false, esc = false;
+      for (let i = start; i < text.length; i++) {
+        const ch = text[i];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (ch === "\\") esc = true;
+          else if (ch === '"') inStr = false;
+        } else {
+          if (ch === '"') inStr = true;
+          else if (ch === "{") depth++;
+          else if (ch === "}") {
+            depth--;
+            if (depth === 0) return text.slice(start, i + 1);
+          }
+        }
+      }
+      return null; // não achou fechamento
+    };
 
-let raw = response.output_text || "{}";
+    const tryParse = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
+    // ===== 1ª tentativa: limpar e extrair o 1º objeto JSON balanceado =====
+    let cleaned = normalizeSmartQuotes(stripCodeFences(raw));
+    let jsonStr = extractFirstJsonObject(cleaned) || cleaned;
 
-let obj;
-try {
-  obj = JSON.parse(raw);
-} catch (e1) {
-  const cleaned = raw.replace(/^\s*```json\s*|\s*```\s*$/g, "").trim();
-  try {
-    obj = JSON.parse(cleaned);
-  } catch (e2) {
-    console.error("Resposta não-JSON:", raw.slice(0, 300));
-    return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0,300) });
-  }
-}
+    // tentativa A
+    let obj = tryParse(jsonStr);
 
+    // tentativa B: reparar vírgula antes de } ou ]
+    if (!obj) {
+      const repaired = jsonStr.replace(/,\s*([}\]])/g, "$1");
+      obj = tryParse(repaired);
+      jsonStr = repaired;
+    }
 
-return res.json(obj);
-          
+    // tentativa C: se havia outro objeto mais adiante, tentar próximo
+    if (!obj) {
+      let from = cleaned.indexOf("{", (cleaned.indexOf(jsonStr) + jsonStr.length) || 0);
+      while (!obj && from >= 0) {
+        const candidate = extractFirstJsonObject(cleaned.slice(from));
+        if (!candidate) break;
+        obj = tryParse(candidate) || tryParse(candidate.replace(/,\s*([}\]])/g, "$1"));
+        from = cleaned.indexOf("{", from + 1);
+      }
+    }
 
-    
+    // ===== Fallback final: reformatar em JSON com JSON mode (sem web_search) =====
+    if (!obj) {
+      const rehabReq = {
+        model: MODEL,
+        input: [
+          { role: "system",
+            content:
+              "Converta o conteúdo a seguir em um ÚNICO objeto JSON válido. " +
+              "Responda SOMENTE com o objeto JSON (sem markdown, sem texto fora do {}). " +
+              "Se houver erros de formatação, corrija; se faltar fechamento, feche corretamente."
+          },
+          { role: "user", content: raw }
+        ],
+        text: { format: { type: "json_object" } }, // JSON mode permitido aqui (sem web_search)
+        max_output_tokens: 2000,
+        temperature: 0,
+      };
+
+      try {
+        const rehab = await openai.responses.create(rehabReq);
+        const fixed = rehab.output_text || "{}";
+        const fixedObj = tryParse(fixed);
+        if (!fixedObj) {
+          console.error("Resposta não-JSON (fallback) trecho:", fixed.slice(0, 500));
+          return res
+            .status(502)
+            .json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0, 500) });
+        }
+        return res.json(fixedObj);
+      } catch (rehabErr) {
+        console.error("Falha no fallback de reformatar JSON:", rehabErr?.message || rehabErr);
+        return res
+          .status(502)
+          .json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0, 500) });
+      }
+    }
+
+    // sucesso na etapa principal
+    return res.json(obj);
+
   } catch (error) {
     console.error("Erro ao gerar resposta:", error);
     res.status(500).json({ error: "Erro ao gerar resposta" });
   }
-
 });
 
 app.listen(PORT, () => {
