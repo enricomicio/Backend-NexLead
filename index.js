@@ -134,32 +134,33 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
 `.trim();
 
 const oaiReq = {
-  model: MODEL,
-  tools: USE_WEB ? [{ type: "web_search" }] : [],
-  input: [
-    { role: "system", content: systemMsg },
-    { role: "user",   content: prompt }
-  ],
-  text: { format: { type: "json_object" } },
-};
+      model: MODEL,
+      tools: USE_WEB ? [{ type: "web_search" }] : [],
+      input: [
+        { role: "system", content: systemMsg },
+        { role: "user",   content: prompt }
+      ]
+    };
+
+    // JSON mode só quando NÃO estiver usando web_search (limitação da API)
+    if (!USE_WEB) {
+      oaiReq.text = { format: { type: "json_object" } };
+    }
 
     const response = await openai.responses.create(oaiReq);
 
-    // Texto final (após eventuais tool calls)
-    const raw = response.output_text || "";
+    let raw = response.output_text || "{}";
 
-    // Parse direto (deve vir JSON puro por causa do JSON mode)
     let obj;
     try {
       obj = JSON.parse(raw);
     } catch (e1) {
-      // fallback simples: remove cercas ```json ... ```
       const cleaned = raw.replace(/^\s*```json\s*|\s*```\s*$/g, "").trim();
       try {
         obj = JSON.parse(cleaned);
       } catch (e2) {
         console.error("Resposta não-JSON:", raw.slice(0, 300));
-        return res.status(422).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0, 300) });
+        return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0,300) });
       }
     }
 
