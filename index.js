@@ -142,78 +142,52 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
 `.trim();
 
 
-    const oaiReq = {
-      model: MODEL,
-      tools: USE_WEB ? [{ type: "web_search" }] : [],
-      input: [
-        { role: "system", content: systemMsg },
-        { role: "user",   content: prompt }
-      ]
-      // ⬆️ Nada de JSON mode aqui; tudo igual ao que você já usava
-    };
+const oaiReq = {
+  model: MODEL,
+  tools: USE_WEB ? [{ type: "web_search" }] : [],
+  input: [
+    { role: "system", content: systemMsg },
+    { role: "user",   content: prompt }
+  ]
+};
 
-    const response = await openai.responses.create(oaiReq);
 
-    const raw = response.output_text || "";
+if (!USE_WEB) {
+  oaiReq.text = { format: { type: "json_object" } };
+}
 
-    // ====== ÚNICO ACRÉSCIMO: parser robusto para extrair o 1º objeto JSON ======
-    const stripFences = (s) =>
-      String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
 
-    const normalizeQuotes = (s) =>
-      String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+const response = await openai.responses.create(oaiReq);
 
-    const extractFirstJsonObject = (s) => {
-      if (!s) return null;
-      const text = String(s);
-      const start = text.indexOf("{");
-      if (start < 0) return null;
-      let depth = 0, inStr = false, esc = false;
-      for (let i = start; i < text.length; i++) {
-        const ch = text[i];
-        if (inStr) {
-          if (esc) esc = false;
-          else if (ch === "\\") esc = true;
-          else if (ch === '"') inStr = false;
-        } else {
-          if (ch === '"') inStr = true;
-          else if (ch === "{") depth++;
-          else if (ch === "}") {
-            depth--;
-            if (depth === 0) return text.slice(start, i + 1);
-          }
-        }
-      }
-      return null; // não achou fechamento -> manteremos o fallback antigo
-    };
 
-    const tryParse = (s) => { try { return JSON.parse(s); } catch { return null; } };
+let raw = response.output_text || "{}";
 
-    // limpa cercas/aspas, extrai só o objeto
-    let cleaned = normalizeQuotes(stripFences(raw));
-    let jsonStr = extractFirstJsonObject(cleaned) || cleaned;
 
-    // tenta parse direto
-    let obj = tryParse(jsonStr);
+let obj;
+try {
+  obj = JSON.parse(raw);
+} catch (e1) {
+  const cleaned = raw.replace(/^\s*```json\s*|\s*```\s*$/g, "").trim();
+  try {
+    obj = JSON.parse(cleaned);
+  } catch (e2) {
+    console.error("Resposta não-JSON:", raw.slice(0, 300));
+    return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0,300) });
+  }
+}
 
-    // seu fallback antigo (remove cercas; mantém comportamento anterior)
-    if (!obj) {
-      const cleanedOld = raw.replace(/^\s*```json\s*|\s*```\s*$/g, "").trim();
-      obj = tryParse(cleanedOld);
-    }
 
-    if (!obj) {
-      console.error("Resposta não-JSON:", raw.slice(0, 300));
-      return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0,300) });
-    }
+return res.json(obj);
+          
 
-    return res.json(obj);
-
+    
   } catch (error) {
     console.error("Erro ao gerar resposta:", error);
     res.status(500).json({ error: "Erro ao gerar resposta" });
   }
+
 });
+
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
