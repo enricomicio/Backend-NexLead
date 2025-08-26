@@ -94,8 +94,6 @@ ORDEM DE TRABALHO (pare quando TODOS os NÃO-ESTIMÁVEIS estiverem preenchidos)
    Campo "ofensoremti": principal “pedra no sapato” interna para NÃO investir em TI (ex.: congelamento orçamentário, dívida técnica crítica, backlog, compliance/risco, prioridade em core, restrição de CAPEX/OPEX). 1 frase curta.
    Campo "Compelling": razão convincente, orientada a resultado (ROI, risco evitado, eficiência, prazo regulatório etc.) que cria urgência. 1–2 frases, ligada às notícias/dor/faturamento atual. 
 
-
-
 COMO BUSCAR (padrões de consulta e inspeção de página)
 - Para telefone/contato no SITE: 
   search: "site:{domínio} (contato OR 'fale conosco' OR atendimento OR telefone OR contato telefone)"
@@ -132,13 +130,10 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
   [Seu Nome]
   [Seu Telefone]"
 - Saída: SOMENTE o JSON final.
+- **Atenção**: Inicie a resposta com "{" e termine com "}". Não escreva nada fora do JSON.
 - Inclua um CTA claro para uma conversa de 20 minutos nesta semana.
 
 - Saída: SOMENTE o JSON final.
-
-
-
-
 `.trim();
 
 
@@ -149,7 +144,7 @@ const oaiReq = {
     { role: "system", content: systemMsg },
     { role: "user",   content: prompt }
   ],
-  // ✅ ajuste 1: dar fôlego para não truncar o JSON
+  // dá fôlego para não truncar o JSON
   max_output_tokens: 4000
 };
 
@@ -162,7 +157,7 @@ if (!USE_WEB) {
 const response = await openai.responses.create(oaiReq);
 
 
-// ===================== ajuste 2: PARSE ROBUSTO + FALLBACK =====================
+// ===================== PARSE ROBUSTO + FALLBACK “LOSSLESS” =====================
 const raw = response.output_text || "";
 
 // helpers enxutos
@@ -208,14 +203,25 @@ if (!obj) {
   jsonStr = repaired;
 }
 
-// 4) fallback final: reformatar em JSON usando JSON mode (SEM web_search)
+// 4) fallback final: reformatar em JSON usando JSON mode (SEM web_search),
+//    PRESERVANDO 100% DO CONTEÚDO (lossless)
 if (!obj) {
   try {
     const rehab = await openai.responses.create({
       model: MODEL,
       input: [
-        { role: "system", content: "Converta o conteúdo a seguir em UM ÚNICO objeto JSON válido. Responda SOMENTE com o objeto (sem markdown)." },
-        { role: "user",   content: raw }
+        {
+          role: "system",
+          content:
+            "TAREFA: Devolver o MESMO conteúdo recebido em UM ÚNICO objeto JSON válido.\n" +
+            "REGRAS CRÍTICAS (obrigatórias):\n" +
+            "1) Preserve TODAS as chaves, objetos e arrays existentes; NÃO remova nada.\n" +
+            "2) NÃO resuma e NÃO reescreva textos; apenas corrija aspas/virgulas/fechamentos.\n" +
+            "3) Se houver conteúdo fora do objeto JSON, mova-o para o lugar correto mantendo o texto.\n" +
+            "4) Se algum campo estiver truncado, mantenha exatamente como veio (NÃO apague nem resuma).\n" +
+            "5) Saída: SOMENTE o objeto JSON (sem markdown, sem texto fora do {})."
+        },
+        { role: "user", content: raw }
       ],
       text: { format: { type: "json_object" } }, // JSON mode permitido aqui
       max_output_tokens: 2000,
@@ -228,7 +234,7 @@ if (!obj) {
     return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0, 500) });
   }
 }
-// ===================== FIM DO PARSE ROBUSTO =====================
+// ===================== FIM DO PARSE ROBUSTO + FALLBACK =====================
 
 return res.json(obj);
           
