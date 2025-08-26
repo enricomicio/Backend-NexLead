@@ -16,10 +16,11 @@ const MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 const USE_WEB = (process.env.SEARCH_MODE || "none").toLowerCase() === "web";
 
 app.post("/generate", async (req, res) => {
-  try {
-    const { site } = req.body;
+ try {
+  const { site } = req.body;
 
-    const prompt = `
+const prompt = `
+
 Site informado: ${site}
 
 Preencha exatamente este JSON (mantenha os tipos de cada campo):
@@ -62,7 +63,8 @@ Preencha exatamente este JSON (mantenha os tipos de cada campo):
 }
 `.trim();
 
-    const systemMsg = `
+
+const systemMsg = `
 Você é um agente que produz APENAS JSON válido (sem markdown nem comentários).
 Você PODE usar web_search sempre que precisar de informação externa.
 
@@ -91,6 +93,8 @@ ORDEM DE TRABALHO (pare quando TODOS os NÃO-ESTIMÁVEIS estiverem preenchidos)
    Campo "erpatualouprovavel": escolha entre { SAP S/4HANA, SAP ECC, SAP Business One, Oracle NetSuite, TOTVS Protheus, Senior, Sankhya, Omie, “desenvolvimento próprio”, “outro ERP de nicho” } com base em porte/complexidade/segmento/ecossistema do país/noticias/pesquisa na internet; explique em “justificativaERP”.
    Campo "ofensoremti": principal “pedra no sapato” interna para NÃO investir em TI (ex.: congelamento orçamentário, dívida técnica crítica, backlog, compliance/risco, prioridade em core, restrição de CAPEX/OPEX). 1 frase curta.
    Campo "Compelling": razão convincente, orientada a resultado (ROI, risco evitado, eficiência, prazo regulatório etc.) que cria urgência. 1–2 frases, ligada às notícias/dor/faturamento atual. 
+
+
 
 COMO BUSCAR (padrões de consulta e inspeção de página)
 - Para telefone/contato no SITE: 
@@ -131,92 +135,110 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
 - Inclua um CTA claro para uma conversa de 20 minutos nesta semana.
 
 - Saída: SOMENTE o JSON final.
+
+
+
+
 `.trim();
 
-    const oaiReq = {
-      model: MODEL,
-      tools: USE_WEB ? [{ type: "web_search" }] : [],
-      input: [
-        { role: "system", content: systemMsg },
-        { role: "user",   content: prompt }
-      ]
-    };
 
-    if (!USE_WEB) {
-      oaiReq.text = { format: { type: "json_object" } };
-    }
+const oaiReq = {
+  model: MODEL,
+  tools: USE_WEB ? [{ type: "web_search" }] : [],
+  input: [
+    { role: "system", content: systemMsg },
+    { role: "user",   content: prompt }
+  ],
+  // ✅ ajuste 1: dar fôlego para não truncar o JSON
+  max_output_tokens: 4000
+};
 
-    const response = await openai.responses.create(oaiReq);
 
-    // ===================== PARSE ROBUSTO (ÚNICA MUDANÇA REAL) =====================
-    const raw = response.output_text || "";
+if (!USE_WEB) {
+  oaiReq.text = { format: { type: "json_object" } };
+}
 
-    const stripFences = (s) =>
-      String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
 
-    const normalizeQuotes = (s) =>
-      String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+const response = await openai.responses.create(oaiReq);
 
-    const extractFirstJsonObject = (s) => {
-      if (!s) return null;
-      const text = String(s);
-      const start = text.indexOf("{");
-      if (start < 0) return null;
-      let depth = 0, inStr = false, esc = false;
-      for (let i = start; i < text.length; i++) {
-        const ch = text[i];
-        if (inStr) {
-          if (esc) esc = false;
-          else if (ch === "\\") esc = true;
-          else if (ch === '"') inStr = false;
-        } else {
-          if (ch === '"') inStr = true;
-          else if (ch === "{") depth++;
-          else if (ch === "}") {
-            depth--;
-            if (depth === 0) return text.slice(start, i + 1);
-          }
-        }
+
+// ===================== ajuste 2: PARSE ROBUSTO + FALLBACK =====================
+const raw = response.output_text || "";
+
+// helpers enxutos
+const stripFences = s => String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
+const normalizeQuotes = s => String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+const tryParse = s => { try { return JSON.parse(s); } catch { return null; } };
+
+const extractFirstJsonObject = (s) => {
+  if (!s) return null;
+  const text = String(s);
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+    } else {
+      if (ch === '"') inStr = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) return text.slice(start, i + 1);
       }
-      return null; // não encontrou fechamento
-    };
-
-    const tryParse = (s) => { try { return JSON.parse(s); } catch { return null; } };
-
-    // Limpa cercas/aspas e extrai só o 1º objeto JSON (ignora “Aqui está o JSON…”)
-    let cleaned = normalizeQuotes(stripFences(raw));
-    let jsonStr = extractFirstJsonObject(cleaned) || cleaned;
-
-    // Tenta parse direto
-    let obj = tryParse(jsonStr);
-
-    // Fallback leve: remove vírgula antes de } ou ]
-    if (!obj) {
-      const repaired = jsonStr.replace(/,\s*([}\]])/g, "$1");
-      obj = tryParse(repaired);
-      jsonStr = repaired;
     }
+  }
+  return null; // sem fechamento
+};
 
-    // Fallback antigo que você já tinha (remove cercas simples)
-    if (!obj) {
-      const cleanedOld = raw.replace(/^\s*```json\s*|\s*```\s*$/g, "").trim();
-      obj = tryParse(cleanedOld);
-    }
+// 1) limpar e extrair só o 1º objeto balanceado
+let cleaned = normalizeQuotes(stripFences(raw));
+let jsonStr = extractFirstJsonObject(cleaned) || cleaned;
 
-    if (!obj) {
-      console.error("Resposta não-JSON:", raw.slice(0, 500));
-      return res
-        .status(502)
-        .json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0, 500) });
-    }
-    // ===================== FIM DO PARSE ROBUSTO =====================
+// 2) parse direto
+let obj = tryParse(jsonStr);
 
-    return res.json(obj);
+// 3) pequeno reparo (vírgula antes de } ou ])
+if (!obj) {
+  const repaired = jsonStr.replace(/,\s*([}\]])/g, "$1");
+  obj = tryParse(repaired);
+  jsonStr = repaired;
+}
 
+// 4) fallback final: reformatar em JSON usando JSON mode (SEM web_search)
+if (!obj) {
+  try {
+    const rehab = await openai.responses.create({
+      model: MODEL,
+      input: [
+        { role: "system", content: "Converta o conteúdo a seguir em UM ÚNICO objeto JSON válido. Responda SOMENTE com o objeto (sem markdown)." },
+        { role: "user",   content: raw }
+      ],
+      text: { format: { type: "json_object" } }, // JSON mode permitido aqui
+      max_output_tokens: 2000,
+      temperature: 0
+    });
+    const fixed = rehab.output_text || "{}";
+    obj = JSON.parse(fixed);
+  } catch (e) {
+    console.error("Resposta não-JSON:", raw.slice(0, 500));
+    return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0, 500) });
+  }
+}
+// ===================== FIM DO PARSE ROBUSTO =====================
+
+return res.json(obj);
+          
+
+    
   } catch (error) {
     console.error("Erro ao gerar resposta:", error);
     res.status(500).json({ error: "Erro ao gerar resposta" });
   }
+
 });
 
 app.listen(PORT, () => {
