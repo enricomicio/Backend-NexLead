@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
+const REQUEST_TIMEOUT_MS = parseInt(process.env.REQ_TIMEOUT_MS || "55000", 10);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -121,7 +122,29 @@ REGRAS DE SAÍDA (TIPOS E FORMATO)
       oaiReq.text = { format: { type: "json_object" } };
     }
 
-    const response = await openai.responses.create(oaiReq);
+  // chamada ao OpenAI com timeout controlado (substitui a linha única)
+let response;
+try {
+  const ac = new AbortController();               // Node 18+ tem AbortController global
+  const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    response = await openai.responses.create({ ...oaiReq, signal: ac.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+} catch (err) {
+  const status = err?.status && Number.isInteger(err.status) ? err.status : 502;
+  const msg = err?.message || "Falha ao chamar o provedor de IA";
+  console.error("OpenAI error:", status, msg);
+
+  return res.status(status).json({
+    error: "Upstream error",
+    detail: msg,
+    hint: "Tente novamente em instantes. Se persistir, reduza buscas ou desative web_search temporariamente."
+  });
+}
+
 
     // ===================== PARSE ROBUSTO + FALLBACK “LOSSLESS” =====================
     const raw = response.output_text || "";
