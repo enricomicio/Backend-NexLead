@@ -1,3 +1,4 @@
+// backend/index.js
 const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
@@ -12,118 +13,158 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-const MODEL = process.env.OPENAI_MODEL || "gpt-4o";
-const USE_WEB = (process.env.SEARCH_MODE || "none").toLowerCase() === "web";
+const MODEL   = process.env.OPENAI_MODEL || "gpt-4o";
+const USE_WEB = (process.env.SEARCH_MODE || "web").toLowerCase() === "web";
 
-// DEBUG liga/desliga logs RAW
-const DEBUG_RAW = true;
-
-/* ===================== helpers de log e util ===================== */
-function logLarge(label, text, chunk = 6000) {
-  if (!text) return;
-  console.log(`----- ${label} (len=${text.length}) BEGIN -----`);
-  for (let i = 0; i < text.length; i += chunk) {
-    console.log(text.slice(i, i + chunk));
-  }
+// ===== Helpers de log =====
+const LOG_LIMIT = 12000;
+const printRaw = (label, s) => {
+  const txt = String(s || "");
+  console.log(`----- ${label} (len=${txt.length}) BEGIN -----`);
+  console.log(txt.slice(0, LOG_LIMIT));
+  if (txt.length > LOG_LIMIT) console.log(`... [truncado ${txt.length - LOG_LIMIT} chars]`);
   console.log(`----- ${label} END -----`);
-}
-function safeStringify(obj, limit = 120000) {
+};
+
+function printToolsDetected(resp) {
   try {
-    const s = JSON.stringify(obj, null, 2);
-    return s.length > limit ? s.slice(0, limit) + "\n...[truncated]..." : s;
-  } catch {
-    return String(obj);
-  }
-}
-function detectTools(resp) {
-  const found = [];
-  try {
-    const j = JSON.parse(JSON.stringify(resp));
-    const scan = (node) => {
-      if (!node || typeof node !== "object") return;
-      const t = (node.type || "").toString().toLowerCase();
-      if (t.includes("tool") || t.includes("web_search")) {
-        found.push({
-          type: node.type || "unknown",
-          name: node.tool_name || node.name || (node.action && node.action.type) || "unknown"
-        });
+    const outs = resp?.output || [];
+    const tools = [];
+    for (const item of outs) {
+      if (item?.type && item.type.endsWith("_call")) {
+        tools.push({ type: item.type, name: item.action?.type || "unknown" });
       }
-      for (const k in node) scan(node[k]);
-    };
-    scan(j);
-  } catch {}
-  return found;
-}
-function toHost(urlLike) {
-  try {
-    let s = String(urlLike || "").trim();
-    if (!s) return "";
-    if (!/^https?:\/\//i.test(s)) s = "https://" + s;
-    const u = new URL(s);
-    return u.host.toLowerCase();
-  } catch {
-    return String(urlLike || "").replace(/^https?:\/\//i, "").split("/")[0].toLowerCase();
+    }
+    const toolChoice = resp?.tool_choice ?? "auto";
+    console.log("[/generate] tools detected:", JSON.stringify(tools.length ? tools : "none"));
+    console.log("[/generate] tool_choice:", JSON.stringify(toolChoice));
+  } catch (e) {
+    console.log("[tools-detected] erro ao inspecionar tools");
   }
 }
-function stripWWW(host) {
-  return host.replace(/^www\./i, "");
-}
-function isEmptyVal(v) {
-  if (v === null || v === undefined) return true;
-  if (typeof v === "string") return v.trim() === "";
-  if (Array.isArray(v)) return v.length === 0;
-  if (typeof v === "object") return Object.keys(v).length === 0;
-  return false;
-}
-function findMissingFields(obj) {
-  const required = [
-    "nomedaempresa","cnpj","mapa","telefonepublico","segmento","fundacao","subsegmento",
-    "criteriofiscal","funcionarios","faturamento","localização","erpatualouprovavel","justificativaERP",
-    "solucaofiscalouprovavel","principaldordonegocio","investimentoemti","ofensoremti",
-    "modelodeemailti","modelodeemailfinanceiro","ultimas5noticias","Compelling","gatilhocomercial",
-    "site","organogramaclevel","powermap"
-  ];
-  const missing = [];
-  for (const k of required) {
-    if (!(k in obj) || isEmptyVal(obj[k])) missing.push(k);
+
+// ===== Parser robusto p/ JSON “sujinho” =====
+const stripFences = s => String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
+const normalizeQuotes = s => String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+const tryParse = s => { try { return JSON.parse(s); } catch { return null; } };
+
+const extractFirstJsonObject = (s) => {
+  if (!s) return null;
+  const text = String(s);
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+    } else {
+      if (ch === '"') inStr = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) return text.slice(start, i + 1);
+      }
+    }
   }
-  return missing;
-}
-function coerceArrays(obj) {
-  // Garantir arrays para esses campos
-  if (!Array.isArray(obj.ultimas5noticias)) obj.ultimas5noticias = [];
-  if (!Array.isArray(obj.organogramaclevel)) obj.organogramaclevel = [];
-  if (!Array.isArray(obj.powermap)) obj.powermap = [];
+  return null;
+};
+
+function sanitizeAndParse(raw) {
+  let cleaned = normalizeQuotes(stripFences(raw || ""));
+  let jsonStr = extractFirstJsonObject(cleaned) || cleaned;
+  let obj = tryParse(jsonStr);
+  if (!obj) {
+    const repaired = jsonStr.replace(/,\s*([}\]])/g, "$1");
+    obj = tryParse(repaired);
+  }
   return obj;
 }
-/* ================================================================= */
 
-app.post("/generate", async (req, res) => {
+// ===== Chamada OpenAI com fallback se max_tool_calls não for suportado =====
+async function callOAIWithMaxToolCalls(oaiReq, maxToolCalls) {
+  const req = { ...oaiReq };
+  if (typeof maxToolCalls === "number") req.max_tool_calls = maxToolCalls;
+
   try {
-    const { site } = req.body;
-    const host = toHost(site);
-    const base = stripWWW(host);
+    return await openai.responses.create(req);
+  } catch (err) {
+    const msg = err?.message || "";
+    if (msg.includes("Unknown parameter") && msg.includes("max_tool_calls")) {
+      console.warn("[OpenAI] 'max_tool_calls' não suportado — repetindo sem esse parâmetro.");
+      delete req.max_tool_calls;
+      return await openai.responses.create(req);
+    }
+    throw err;
+  }
+}
 
-    // Queries genéricas obrigatórias (cobertura ampla)
-    const baseQueries = [
-      `site:${host} cnpj`,
-      `site:${host} "fale conosco" OR contato OR telefone`,
-      `site:${host} quem somos OR "sobre" OR institucional`,
-      `site:${host} "política de privacidade"`,
-      `"${base}" site:google.com/maps`,
-      `${base} LinkedIn employees`,
-      `${base} faturamento 2023 OR receita 2023`,
-      `${base} "número de funcionários"`,
-      `${base} ERP OR "sistema de gestão"`,
-      `${base} "solução fiscal" OR "software fiscal"`,
-      `${base} aquisição OR investimento OR expansão site:news.google.com`,
-      `${base} endereço`
-    ];
+// ===== PROMPTS =====
+function buildSystemMsg(site) {
+  return `
+Você é um agente que retorna **APENAS** um **objeto JSON válido** (sem markdown, sem comentários, sem texto fora de { ... }).
+Você **PODE** usar web_search sempre que precisar de informação externa e deve continuar pesquisando enquanto houver campos vazios ou fracos.
 
-    const prompt = `
+⚠️ TODOS os campos são **igualmente importantes** (CNPJ, funcionários, faturamento, modelos de e-mail, ERP, fiscal, notícias, etc.). Não priorize apenas dados legais.
+
+### Padrões de qualidade por campo
+- **nomedaempresa**: razão social oficial da **MATRIZ** (se houver S/A, LTDA, etc., mantenha).
+- **cnpj**: CNPJ da **MATRIZ** no formato 00.000.000/0001-00 (fonte: site institucional, políticas legais, CVM, portal gov.br, perfis oficiais).
+- **mapa**: **URL clicável do perfil oficial no Google Maps** da MATRIZ (ex.: "https://www.google.com/maps/place/..."). **Não** retorne apenas endereço textual.
+- **telefonepublico**: telefone público do site institucional; se não houver, use o do perfil no Google Maps.
+- **segmento / subsegmento**: concisos e coerentes com a atuação principal (ex.: "Tecnologia / Provedores de conteúdo na internet").
+- **fundacao**: ano (AAAA) ou data completa (DD/MM/AAAA) se constar oficialmente.
+- **localização**: Cidade/UF da MATRIZ (ex.: "São Paulo, SP").
+- **funcionarios**: real (com fonte). Se não houver, **estime** com critério claro (ex.: LinkedIn, notícias, porte; formato sugerido: "1.001–5.000 (estimativa — critério: headcount LinkedIn)").
+- **faturamento**: se houver valor confiável, retorne "R$ X/ano (AAAA) – fonte: ...".
+  - Se a fonte estiver em **USD**, retorne **ambos**: "US$ X (AAAA) ≈ R$ Y – câmbio 5,0 BRL/USD – fonte: ...".
+  - Se **não** houver fonte direta, **estime** com critério explícito (receita/funcionário do setor × funcionários; comparação com pares; faixas de imprensa).
+- **erpatualouprovavel**: escolha entre { SAP S/4HANA, SAP ECC, SAP Business One, Oracle NetSuite, TOTVS Protheus, Senior, Sankhya, Omie, desenvolvimento próprio, outro ERP de nicho } com base em porte/segmento/notícias/ecossistema. Explique em **justificativaERP** de forma sucinta e factual.
+- **solucaofiscalouprovavel**: escolha entre { Thomson Reuters, Sovos, Solutio, Avalara, Guepardo, 4Tax, BPO fiscal, planilhas/house } com critério em **criteriofiscal** (porte/ERP/segmento/custo/notícias).
+- **principaldordonegocio**: 1–2 frases sobre dores relevantes (ex.: eficiência operacional, compliance, escalabilidade, SLAs, omnichannel, prazos regulatórios).
+- **investimentoemti**: se houver benchmark setorial, use-o (cite o critério).
+  - Caso contrário, **2% do faturamento** (em **R$**). Se o faturamento estiver em USD, **converta** primeiro usando **câmbio 5,0 BRL/USD** e explique: "Critério: 2% de R$ {faturamento convertido}".
+  - Formato textual único (string), claro e auditável.
+- **ofensoremti**: 1 frase com o principal bloqueador (ex.: congelamento orçamentário, dívida técnica, backlog, CAPEX/OPEX).
+- **ultimas5noticias**: **5 itens** dos últimos **24 meses** **relacionados a crescimento, expansão, investimentos, tecnologia, M&A, parcerias, CAPEX/OPEX, resultados** — **evite** matérias opinativas/editoriais.
+  - Cada item: { "titulo", "data" (AAAA-MM-DD), "url", "resumo" (≤ 25 palavras) }.
+  - Itens **distintos** e de fontes confiáveis; evitar duplicatas; priorizar fatos que **sustentem investimento em TI**.
+- **modelodeemailti** e **modelodeemailfinanceiro**: **texto completo** com o formato:
+  "ASSUNTO: <linha>"
+  <linha em branco>
+  <corpo 2–4 parágrafos, 120–180 palavras, **personalizado** com nomedaempresa/segmento/uma ou mais notícias/“Compelling”/dor > 
+  <linha em branco>
+  "Atenciosamente,
+  [Seu Nome]
+  [Seu Telefone]"
+  - **Inclua CTA** claro para uma conversa de 20 minutos **esta semana**.
+- **Compelling**: 1–2 frases orientadas a ROI/risco/eficiência/prazo regulatório, conectadas às notícias/dor/faturamento.
+- **gatilhocomercial**: 1–2 frases com time-to-value/urgência (janela regulatória, pico sazonal, corte de custos).
+- **organogramaclevel**: preencha nomes quando houver fonte; caso contrário deixe vazio, mas **tente** ao menos o CEO/CFO.
+  - Mantenha a chave "Cargo" **exatamente** com maiúscula (conforme o schema).
+- **powermap**: 3 itens: Decisor, Influenciador, Barreira. Use nomes reais quando possível com **justificativa** breve (fonte/indício). Se não houver, deixe nomes vazios mas mantenha as classificações.
+
+### Como buscar (sugestões)
+- Site institucional: "sobre", "quem somos", rodapé, "política de privacidade", "contato".
+- CNPJ: site institucional; se faltar, imprensa/cadastros; **confirme** razão social/endereço.
+- Mapa: "site:google.com/maps {razão social} {cidade}" (perfil oficial).
+- Funcionários: LinkedIn/press-kit/imprensa.
+- Notícias: "{razão social} (investimento OR expansão OR aquisição OR parceria OR captação OR data center OR ERP OR cloud OR compliance)".
+
+### Regras de saída
+- **Saída: SOMENTE o JSON final** (comece em "{" e termine em "}").
+- **Nunca** escreva “não encontrado”. Para factuais sem fonte após pesquisar, use "em verificação". Para estimáveis, **estime** com critério.
+- Preencha **todos** os campos; evite deixar strings vazias se houver base para estimar.
+`.trim();
+}
+
+function buildUserPrompt(site) {
+  return `
 Site informado: ${site}
 
-Preencha exatamente este JSON (mantenha os tipos de cada campo) — SAÍDA: SOMENTE o JSON (comece em "{" e termine em "}"; não escreva texto fora do JSON):
+Preencha exatamente este JSON (mantenha os tipos de cada campo) — SAÍDA: **SOMENTE** o JSON (comece em "{" e termine em "}"):
 
 {
   "nomedaempresa": "",
@@ -162,221 +203,167 @@ Preencha exatamente este JSON (mantenha os tipos de cada campo) — SAÍDA: SOME
   ]
 }
 `.trim();
+}
 
-    const systemBase = `
-Você é um agente que produz APENAS JSON válido (sem markdown, sem comentários, sem preâmbulos).
-Use EXATAMENTE as chaves do template acima (inclusive acentos, ex.: "localização").
+function buildRefineSystemMsg() {
+  return `
+Você completa um **JSON existente**. Use **web_search** e preencha **todos** os campos vazios ou fracos seguindo os mesmos padrões de qualidade:
+
+- Notícias: 5 itens (24 meses) focados em crescimento/expansão/tecnologia/finanças, cada um com {titulo,data AAAA-MM-DD,url,resumo ≤ 25 palavras}.
+- "mapa": **URL do Google Maps da MATRIZ**, não endereço textual.
+- E-mails (TI/Financeiro): 120–180 palavras, personalizados com empresa/segmento/notícias/Compelling/dor, CTA de 20 minutos.
+- "investimentoemti": benchmark setorial; se ausente, **2% do faturamento em R$** (se faturamento estiver em USD, **converta com 5,0 BRL/USD** e explique).
+- ERP/fiscal: escolha provável com **critério** e justificativa clara.
+- Para factuais sem fonte mesmo após buscar, use "em verificação". Para estimáveis, **preencha** com critério explícito.
+
+⚠️ Saída: **apenas** o JSON final, sem markdown, começando em "{" e terminando em "}".
 `.trim();
+}
 
-    const systemPass1 = `
-${systemBase}
+function buildRefineUserPrompt(prevJSON, camposFaltando) {
+  return `
+JSON parcial atual (com campos vazios ou fracos):
+${prevJSON}
 
-### QUERIES OBRIGATÓRIAS (PASSO 1)
-A seguir há uma lista "QUERIES" já prontas. Você DEVE chamar "web_search" uma vez para **cada linha**, exatamente como está, sem colar o prompt ou o JSON no parâmetro "query". Não finalize o JSON antes de considerar TODAS as chamadas.
+Campos faltando/insuficientes: ${camposFaltando.join(", ")}
 
-QUERIES:
-${baseQueries.map(q => `- ${q}`).join("\n")}
+Complete **todos** os campos acima **sem remover** dados já corretos. 
+Lembre-se de: 
+- manter "mapa" como URL do Google Maps da MATRIZ,
+- montar 5 notícias 100% ligadas a crescimento/expansão/tecnologia/finanças (não opinião),
+- produzir e-mails TI/Financeiro completos (120–180 palavras) com CTA de 20 minutos,
+- justificar estimativas (funcionários, faturamento, ERP, fiscal, investimentoemti),
+- converter USD→BRL a 5,0 quando necessário (explicando no texto de "faturamento" e no "investimentoemti").
 
-### COBERTURA DE TODOS OS CAMPOS
-- Preencha TODOS os campos. Se um fato não existir publicamente, use melhor estimativa com critério explícito no próprio campo justificativo (ex.: "justificativaERP" / "criteriofiscal" / "investimentoemti").
-- "ultimas5noticias": 5 itens (≤24 meses) no formato { "titulo","data"(AAAA-MM-DD),"url","resumo"(≤25 palavras) }.
-- SEMPRE preencha "modelodeemailti" e "modelodeemailfinanceiro" (120–180 palavras, personalizar com nomedaempresa/segmento/notícias/dor/compelling; concluir com CTA para conversa de 20 minutos nesta semana).
-
-### SAÍDA
-- Somente o objeto JSON final (sem \`\`\`).
+Saída: **somente** o JSON final.
 `.trim();
+}
 
-    // ===== PASSO 1 =====
+// ===== ROTA =====
+app.post("/generate", async (req, res) => {
+  try {
+    const { site } = req.body;
+    console.log("[/generate] site:", site);
+
+    // ===== PASSO 1: JSON INICIAL =====
+    const systemMsg1 = buildSystemMsg(site);
+    const prompt1    = buildUserPrompt(site);
+
     const req1 = {
       model: MODEL,
       tools: USE_WEB ? [{ type: "web_search" }] : [],
-      tool_choice: USE_WEB ? "auto" : "none",
+      tool_choice: "auto",
       input: [
-        { role: "system", content: systemPass1 },
-        { role: "user",   content: prompt }
+        { role: "system", content: systemMsg1 },
+        { role: "user",   content: prompt1 }
       ],
       temperature: 0,
       max_output_tokens: 4000
     };
 
-    console.log("[/generate] site:", site);
     console.log("[/generate] model:", MODEL, "| USE_WEB:", USE_WEB, "| tool_choice:", JSON.stringify(req1.tool_choice));
-
-    const resp1 = await openai.responses.create(req1);
+    const resp1 = await callOAIWithMaxToolCalls(req1, USE_WEB ? 8 : undefined);
 
     const raw1 = resp1.output_text || "";
     console.log("[/generate] PASSO 1 — output_text length:", raw1.length);
+    printRaw("RAW PASSO 1", raw1);
+    printRaw("RESPONSE JSON PASSO 1", JSON.stringify(resp1));
+    printToolsDetected(resp1);
+    console.log("[/generate] PASSO 1 — usage:", JSON.stringify(resp1?.usage || {}));
 
-    if (DEBUG_RAW) {
-      logLarge("RAW PASSO 1", raw1);
-      const respJson = safeStringify(resp1);
-      logLarge("RESPONSE JSON PASSO 1", respJson);
-      const toolsUsed = detectTools(resp1);
-      console.log("[/generate] PASSO 1 — tools:", toolsUsed.length ? JSON.stringify(toolsUsed) : "none");
-      try {
-        console.log("[/generate] PASSO 1 — usage:", JSON.stringify(resp1.usage || {}, null, 2));
-      } catch {}
-    }
-
-    // Parse robusto do Passo 1
-    const stripFences = s => String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
-    const normalizeQuotes = s => String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
-    const tryParse = s => { try { return JSON.parse(s); } catch { return null; } };
-    const extractFirstJsonObject = (s) => {
-      if (!s) return null;
-      const text = String(s);
-      const start = text.indexOf("{");
-      if (start < 0) return null;
-      let depth = 0, inStr = false, esc = false;
-      for (let i = start; i < text.length; i++) {
-        const ch = text[i];
-        if (inStr) {
-          if (esc) esc = false;
-          else if (ch === "\\") esc = true;
-          else if (ch === '"') inStr = false;
-        } else {
-          if (ch === '"') inStr = true;
-          else if (ch === "{") depth++;
-          else if (ch === "}") {
-            depth--;
-            if (depth === 0) return text.slice(start, i + 1);
-          }
-        }
-      }
-      return null;
-    };
-
-    let cleaned1 = normalizeQuotes(stripFences(raw1));
-    let jsonStr1 = extractFirstJsonObject(cleaned1) || cleaned1;
-    let obj1 = tryParse(jsonStr1);
-
+    let obj1 = sanitizeAndParse(raw1);
     if (!obj1) {
-      // tenta reparo leve
-      const repaired = jsonStr1.replace(/,\s*([}\]])/g, "$1");
-      obj1 = tryParse(repaired);
-      jsonStr1 = repaired;
-    }
-    if (!obj1) {
-      // fallback pedindo conversão para JSON
       const rehab = await openai.responses.create({
         model: MODEL,
         input: [
-          { role: "system", content: "Converta o conteúdo a seguir em UM ÚNICO objeto JSON válido. Preserve chaves/valores. Saída: somente o JSON." },
-          { role: "user",   content: raw1 }
+          { role: "system", content: "Converta o conteúdo em UM ÚNICO objeto JSON válido. Preserve chaves/valores. Sem markdown." },
+          { role: "user", content: raw1 }
         ],
         text: { format: { type: "json_object" } },
-        max_output_tokens: 2000,
-        temperature: 0
+        temperature: 0,
+        max_output_tokens: 2000
       });
-      obj1 = JSON.parse(rehab.output_text || "{}");
+      const fixed = rehab.output_text || "{}";
+      obj1 = tryParse(fixed);
+    }
+    if (!obj1 || typeof obj1 !== "object") {
+      return res.status(502).json({ error: "Modelo não retornou JSON válido no PASSO 1" });
     }
 
-    obj1 = coerceArrays(obj1);
-    let missing = findMissingFields(obj1);
+    // Checar campos vazios/chaves faltando
+    const expectedKeys = [
+      "nomedaempresa","cnpj","mapa","telefonepublico","segmento","fundacao","subsegmento","criteriofiscal",
+      "funcionarios","faturamento","localização","erpatualouprovavel","justificativaERP","solucaofiscalouprovavel",
+      "principaldordonegocio","investimentoemti","ofensoremti","modelodeemailti","modelodeemailfinanceiro",
+      "ultimas5noticias","Compelling","gatilhocomercial","site","organogramaclevel","powermap"
+    ];
 
-    // ===== PASSO 2 (auto-refine) — só se ainda faltam campos =====
-    if (missing.length > 0 && USE_WEB) {
-      // monta queries adicionais focadas nos campos que faltam
-      const targeted = [];
-      if (missing.includes("funcionarios")) targeted.push(`${base} "número de funcionários" LinkedIn`);
-      if (missing.includes("faturamento"))  targeted.push(`${base} faturamento 2023 OR 2024 OR receita 2023 OR 2024`);
-      if (missing.includes("mapa"))         targeted.push(`"${base}" site:google.com/maps`);
-      if (missing.includes("telefonepublico")) targeted.push(`site:${host} "fale conosco" OR "telefone"`);
-      if (missing.includes("segmento") || missing.includes("subsegmento")) targeted.push(`site:${host} quem somos OR institucional`);
-      if (missing.includes("fundacao"))     targeted.push(`${base} fundação ano`);
-      if (missing.includes("erpatualouprovavel") || missing.includes("justificativaERP")) targeted.push(`${base} ERP "SAP" OR "TOTVS" OR "Oracle" OR "Senior"`);
-      if (missing.includes("solucaofiscalouprovavel") || missing.includes("criteriofiscal")) targeted.push(`${base} "solução fiscal" Sovos OR Thomson OR Avalara OR Guepardo`);
-      if (missing.includes("ultimas5noticias")) targeted.push(`${base} expansão OR aquisição OR investimento site:news.google.com`);
-      if (missing.includes("organogramaclevel")) targeted.push(`${base} CEO CFO CTO LinkedIn`);
-      if (missing.includes("powermap")) targeted.push(`${base} diretoria executiva LinkedIn`);
+    const missingOrWeak = [];
+    for (const k of expectedKeys) {
+      if (!(k in obj1)) { missingOrWeak.push(k); continue; }
+      const v = obj1[k];
+      if (v === "" || v == null) { missingOrWeak.push(k); continue; }
+      if (Array.isArray(v) && v.length === 0) { missingOrWeak.push(k); continue; }
+    }
 
-      // sempre garantimos que emails sejam preenchidos (mesmo sem web)
-      if (missing.includes("modelodeemailti")) targeted.push(`${base} notícias recentes site:news.google.com`);
-      if (missing.includes("modelodeemailfinanceiro")) targeted.push(`${base} notícias recentes site:news.google.com`);
+    if (!missingOrWeak.length) {
+      return res.json(obj1);
+    }
 
-      const systemPass2 = `
-${systemBase}
+    // ===== PASSO 2: REFINO DOS CAMPOS FALTANTES =====
+    const systemMsg2 = buildRefineSystemMsg();
+    const prevStr = JSON.stringify(obj1, null, 2);
+    const prompt2  = buildRefineUserPrompt(prevStr, missingOrWeak);
 
-### REPARO (PASSO 2)
-Você deixou os seguintes campos faltando: ${missing.join(", ")}.
-Abaixo há uma lista "QUERIES" de buscas curtas e específicas. 
-- Você DEVE chamar "web_search" **uma vez por linha** (sem colar o prompt ou o JSON no parâmetro "query"). 
-- NÃO finalize a resposta até **cobrir todos os campos faltantes** com dado factual ou estimativa **com critério explícito**.
+    const req2 = {
+      model: MODEL,
+      tools: USE_WEB ? [{ type: "web_search" }] : [],
+      tool_choice: "auto",
+      input: [
+        { role: "system", content: systemMsg2 },
+        { role: "user",   content: prompt2 }
+      ],
+      temperature: 0,
+      max_output_tokens: 5000
+    };
 
-QUERIES:
-${targeted.concat(baseQueries).map(q => `- ${q}`).join("\n")}
+    console.log("[/generate] PASSO 2 — refinamento, campos faltando:", missingOrWeak.length);
+    const resp2 = await callOAIWithMaxToolCalls(req2, USE_WEB ? 10 : undefined);
 
-### LEMBRETES
-- "ultimas5noticias": 5 itens (≤24 meses) com {titulo, data AAAA-MM-DD, url, resumo ≤ 25 palavras}.
-- Preencha SEMPRE "modelodeemailti" e "modelodeemailfinanceiro" (120–180 palavras, personalizados; terminar com CTA de 20min nesta semana).
+    const raw2 = resp2.output_text || "";
+    console.log("[/generate] PASSO 2 — output_text length:", raw2.length);
+    printRaw("RAW PASSO 2", raw2);
+    printRaw("RESPONSE JSON PASSO 2", JSON.stringify(resp2));
+    printToolsDetected(resp2);
+    console.log("[/generate] PASSO 2 — usage:", JSON.stringify(resp2?.usage || {}));
 
-### SAÍDA
-- Somente o objeto JSON final (sem \`\`\`), com TODOS os campos do template presentes.
-`.trim();
-
-      const req2 = {
-        model: MODEL,
-        tools: [{ type: "web_search" }],
-        tool_choice: "auto",
-        input: [
-          { role: "system", content: systemPass2 },
-          // importante: passamos o objeto do passo 1 como contexto para "completar"
-          { role: "user", content: `A seguir está o JSON atual (incompleto). COMPLETE os campos faltantes e devolva o JSON FINAL:\n\n${JSON.stringify(obj1, null, 2)}` }
-        ],
-        temperature: 0,
-        max_output_tokens: 5000
-      };
-
-      console.log("[/generate] PASSO 2 — refinamento, campos faltando:", missing.length);
-      const resp2 = await openai.responses.create(req2);
-
-      const raw2 = resp2.output_text || "";
-      console.log("[/generate] PASSO 2 — output_text length:", raw2.length);
-
-      if (DEBUG_RAW) {
-        logLarge("RAW PASSO 2", raw2);
-        const respJson2 = safeStringify(resp2);
-        logLarge("RESPONSE JSON PASSO 2", respJson2);
-        const toolsUsed2 = detectTools(resp2);
-        console.log("[/generate] PASSO 2 — tools:", toolsUsed2.length ? JSON.stringify(toolsUsed2) : "none");
-        try {
-          console.log("[/generate] PASSO 2 — usage:", JSON.stringify(resp2.usage || {}, null, 2));
-        } catch {}
-      }
-
-      // Parse robusto Passo 2
-      let cleaned2 = normalizeQuotes(stripFences(raw2));
-      let jsonStr2 = extractFirstJsonObject(cleaned2) || cleaned2;
-      let obj2 = tryParse(jsonStr2);
-      if (!obj2) {
-        const repaired2 = jsonStr2.replace(/,\s*([}\]])/g, "$1");
-        obj2 = tryParse(repaired2);
-        jsonStr2 = repaired2;
-      }
-      if (!obj2) {
+    let obj2 = sanitizeAndParse(raw2);
+    if (!obj2 || typeof obj2 !== "object") {
+      try {
         const rehab2 = await openai.responses.create({
           model: MODEL,
           input: [
-            { role: "system", content: "Converta o conteúdo a seguir em UM ÚNICO objeto JSON válido. Preserve chaves/valores. Saída: somente o JSON." },
+            { role: "system", content: "Converta o conteúdo em UM ÚNICO objeto JSON válido. Preserve chaves/valores. Sem markdown." },
             { role: "user",   content: raw2 }
           ],
           text: { format: { type: "json_object" } },
-          max_output_tokens: 2000,
-          temperature: 0
+          temperature: 0,
+          max_output_tokens: 3000
         });
-        obj2 = JSON.parse(rehab2.output_text || "{}");
+        const fixed2 = rehab2.output_text || "{}";
+        obj2 = tryParse(fixed2);
+      } catch {
+        obj2 = obj1;
       }
-      obj2 = coerceArrays(obj2);
-      // se ainda faltar algo, ao menos devolvemos o melhor que conseguiu:
-      return res.json(obj2);
     }
 
-    // Se não faltou nada após o Passo 1:
-    return res.json(obj1);
+    const finalObj = { ...obj1, ...(obj2 || {}) };
+    return res.json(finalObj);
 
   } catch (error) {
     console.error("Erro ao gerar resposta:", error);
-    res.status(500).json({ error: "Erro ao gerar resposta" });
+    const status = error?.status && Number.isInteger(error.status) ? error.status : 500;
+    res.status(status).json({ error: "Erro ao gerar resposta", detail: error?.message || String(error) });
   }
 });
 
