@@ -1,4 +1,6 @@
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQ_TIMEOUT_MS || "55000", 10);
+const DEBUG_RAW = true;
+
 const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
@@ -16,12 +18,51 @@ const openai = new OpenAI({
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 const USE_WEB = (process.env.SEARCH_MODE || "none").toLowerCase() === "web";
 
+/* ---------- Helpers de debug p/ logs grandes e detecção de tools ---------- */
+function logLarge(label, text, chunk = 6000) {
+  if (!text) return;
+  console.log(`----- ${label} (len=${text.length}) BEGIN -----`);
+  for (let i = 0; i < text.length; i += chunk) {
+    console.log(text.slice(i, i + chunk));
+  }
+  console.log(`----- ${label} END -----`);
+}
+
+function safeStringify(obj, limit = 120000) {
+  try {
+    const s = JSON.stringify(obj, null, 2);
+    return s.length > limit ? s.slice(0, limit) + "\n...[truncated]..." : s;
+  } catch {
+    return String(obj);
+  }
+}
+
+function detectTools(resp) {
+  const found = [];
+  try {
+    const j = JSON.parse(JSON.stringify(resp)); // cópia segura
+    const scan = (node) => {
+      if (!node || typeof node !== "object") return;
+      const lowerType = node.type ? String(node.type).toLowerCase() : "";
+      if (lowerType.includes("tool")) {
+        found.push({ type: node.type, name: node.tool_name || node.name || node.tool || "unknown" });
+      }
+      if (node.tool_name || node.name === "web_search") {
+        found.push({ type: node.type || "tool", name: node.tool_name || node.name });
+      }
+      for (const k in node) scan(node[k]);
+    };
+    scan(j);
+  } catch {}
+  return found;
+}
+/* -------------------------------------------------------------------------- */
+
 app.post("/generate", async (req, res) => {
- try {
-  const { site } = req.body;
+  try {
+    const { site } = req.body;
 
-const prompt = `
-
+    const prompt = `
 Site informado: ${site}
 
 Preencha exatamente este JSON (mantenha os tipos de cada campo):
@@ -56,7 +97,7 @@ Preencha exatamente este JSON (mantenha os tipos de cada campo):
     { "nome": "", "Cargo": "CTO" },
     { "nome": "", "Cargo": "COO" }
   ],
-  "powermap": [
+    "powermap": [
     { "nome": "", "cargo": "", "classificacao": "Decisor", "justificativa": "" },
     { "nome": "", "cargo": "", "classificacao": "Influenciador", "justificativa": "" },
     { "nome": "", "cargo": "", "classificacao": "Barreira", "justificativa": "" }
@@ -64,8 +105,7 @@ Preencha exatamente este JSON (mantenha os tipos de cada campo):
 }
 `.trim();
 
-
-const systemMsg = `
+    const systemMsg = `
 Você é um agente que produz APENAS JSON válido (sem markdown nem comentários).
 Você PODE usar web_search sempre que precisar de informação externa.
 
@@ -136,17 +176,12 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
 - Inclua um CTA claro para uma conversa de 20 minutos nesta semana.
 
 - Saída: SOMENTE o JSON final.
-
-
-
-
 `.trim();
 
-
-const oaiReq = {
+    const oaiReq = {
       model: MODEL,
       tools: USE_WEB ? [{ type: "web_search" }] : [],
-      tool_choice: USE_WEB ? { type: "web_search" } : "none", // <— força a ferramenta
+      tool_choice: USE_WEB ? { type: "web_search" } : "none", // força a ferramenta
       input: [
         { role: "system", content: systemMsg },
         { role: "user",   content: prompt }
@@ -184,9 +219,26 @@ const oaiReq = {
       });
     }
 
-    // ===== PARSE ROBUSTO + FALLBACK =====
+    // ===== PARSE ROBUSTO + LOG DE RAW =====
+    const debug = DEBUG_RAW || req.query?.debug === "1" || req.body?.debug === true;
+
     const raw = response.output_text || "";
     console.log("[/generate] output_text length:", raw.length);
+
+    if (debug) {
+      // RAW completo
+      logLarge("RAW", raw);
+      // JSON da resposta (parcial) — para ver estruturas e tool_use
+      const respJson = safeStringify(response);
+      logLarge("RESPONSE JSON", respJson);
+      // Ferramentas detectadas
+      const toolsUsed = detectTools(response);
+      console.log("[/generate] tools detected:", toolsUsed.length ? JSON.stringify(toolsUsed) : "none");
+      // Usage (se disponível)
+      try {
+        console.log("[/generate] usage:", JSON.stringify(response.usage || {}, null, 2));
+      } catch {}
+    }
 
     const stripFences = s => String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
     const normalizeQuotes = s => String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
@@ -243,6 +295,15 @@ const oaiReq = {
         console.error("Resposta não-JSON:", raw.slice(0, 500));
         return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0, 500) });
       }
+    }
+
+    // (Opcional) quando debug estiver ativo, retornar payload com preview do RAW
+    if (debug) {
+      return res.json({
+        debug_raw_preview: raw.slice(0, 8000),
+        keys: Object.keys(obj),
+        data: obj
+      });
     }
 
     return res.json(obj);
