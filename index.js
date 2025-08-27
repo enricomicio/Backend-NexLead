@@ -1,6 +1,3 @@
-const REQUEST_TIMEOUT_MS = parseInt(process.env.REQ_TIMEOUT_MS || "55000", 10);
-const DEBUG_RAW = true;
-
 const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
@@ -18,46 +15,6 @@ const openai = new OpenAI({
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 const USE_WEB = (process.env.SEARCH_MODE || "none").toLowerCase() === "web";
 
-/* ---------- Helpers de debug p/ logs grandes e detecção de tools ---------- */
-function logLarge(label, text, chunk = 6000) {
-  if (!text) return;
-  console.log(`----- ${label} (len=${text.length}) BEGIN -----`);
-  for (let i = 0; i < text.length; i += chunk) {
-    console.log(text.slice(i, i + chunk));
-  }
-  console.log(`----- ${label} END -----`);
-}
-
-function safeStringify(obj, limit = 120000) {
-  try {
-    const s = JSON.stringify(obj, null, 2);
-    return s.length > limit ? s.slice(0, limit) + "\n...[truncated]..." : s;
-  } catch {
-    return String(obj);
-  }
-}
-
-function detectTools(resp) {
-  const found = [];
-  try {
-    const j = JSON.parse(JSON.stringify(resp)); // cópia segura
-    const scan = (node) => {
-      if (!node || typeof node !== "object") return;
-      const lowerType = node.type ? String(node.type).toLowerCase() : "";
-      if (lowerType.includes("tool")) {
-        found.push({ type: node.type, name: node.tool_name || node.name || node.tool || "unknown" });
-      }
-      if (node.tool_name || node.name === "web_search") {
-        found.push({ type: node.type || "tool", name: node.tool_name || node.name });
-      }
-      for (const k in node) scan(node[k]);
-    };
-    scan(j);
-  } catch {}
-  return found;
-}
-/* -------------------------------------------------------------------------- */
-
 app.post("/generate", async (req, res) => {
   try {
     const { site } = req.body;
@@ -65,7 +22,7 @@ app.post("/generate", async (req, res) => {
     const prompt = `
 Site informado: ${site}
 
-Preencha exatamente este JSON (mantenha os tipos de cada campo):
+Preencha exatamente este JSON (mantenha os tipos de cada campo) — SAÍDA: SOMENTE o JSON (comece em "{" e termine em "}"; não escreva texto fora do JSON):
 
 {
   "nomedaempresa": "",
@@ -97,7 +54,7 @@ Preencha exatamente este JSON (mantenha os tipos de cada campo):
     { "nome": "", "Cargo": "CTO" },
     { "nome": "", "Cargo": "COO" }
   ],
-    "powermap": [
+  "powermap": [
     { "nome": "", "cargo": "", "classificacao": "Decisor", "justificativa": "" },
     { "nome": "", "cargo": "", "classificacao": "Influenciador", "justificativa": "" },
     { "nome": "", "cargo": "", "classificacao": "Barreira", "justificativa": "" }
@@ -106,139 +63,67 @@ Preencha exatamente este JSON (mantenha os tipos de cada campo):
 `.trim();
 
     const systemMsg = `
-Você é um agente que produz APENAS JSON válido (sem markdown nem comentários).
-Você PODE usar web_search sempre que precisar de informação externa.
+Você é um agente que produz APENAS JSON válido (sem markdown, sem comentários, sem preâmbulos).
+Use EXATAMENTE as chaves do template acima (inclusive acentos, ex.: "localização").
 
-ORÇAMENTO DE BUSCA
-- Use até 4 chamadas (search/open/find). 
-- Se, após 4 chamadas, ainda faltar QUALQUER campo NÃO-ESTIMÁVEL, você PODE usar até 2 chamadas extras (total 6) para concluir SOMENTE esses factuais.
+### REGRAS CRÍTICAS DE BUSCA (NÃO DESCUMPRA)
+- Ao chamar web_search, NUNCA envie o prompt completo ou o JSON no campo "query".
+- Cada query deve ter de 3 a 12 palavras, específica por tópico, por exemplo:
+  • "site:${site} contato telefone"
+  • "site:${site} cnpj"
+  • "site:google.com/maps {razão social} {cidade} {UF}"
+  • "site:${site} quem somos"
+  • "site:${site} política de privacidade"
+  • "{razão social} faturamento 2023"
+  • "{razão social} número de funcionários"
+  • "{razão social} ERP" / "{razão social} sistema fiscal"
+  • "{razão social} notícias expansão aquisição investimento"
+- Faça buscas MÚLTIPLAS e independentes para cobrir os fatos essenciais.
 
-ORDEM DE TRABALHO (pare quando TODOS os NÃO-ESTIMÁVEIS estiverem preenchidos)
-1) Confirmar NOME OFICIAL e normalizar o domínio a partir do site informado (páginas “Sobre/Quem Somos”, rodapé).
-2) PREENCHER FACTUAIS (NÃO-ESTIMÁVEIS): 
-   • Cnpj (MATRIZ)
-   • telefonepublico (telefone que consta no site institucional; se não houver no site, use o telefone do Perfil da Empresa no Google Maps)
-   • Mapa (URL clicável do Google Maps da MATRIZ)
-   • Localização (UF da matriz)
-   • segmento e Subsegmento
-   • Fundação (ano)
-   Fontes preferidas: site institucional e páginas oficiais; em seguida, Google Maps (perfil da empresa), mídia/portais confiáveis. 
-   Não use “em verificação” enquanto houver orçamento e resultados relevantes a abrir.
-3) "ultimas5noticias": montar 5 itens (até 24 meses) sobre crescimento/expansão, cada item = { "titulo", "data"(AAAA-MM-DD), "url", "resumo"(≤25 palavras) }.
-4) CAMPOS ESTIMÁVEIS (quando não houver fonte direta): funcionarios, faturamento, erpatualouprovavel, solucaofiscalouprovavel, investimentoemti. 
-   Estime com critério explícito (porte, setor, presença geográfica, maturidade digital, headcount público/LinkedIn, benchmarks). 
-   Registre o critério em "justificativaERP", "criteriofiscal" e em "investimentoemti" (STRING no formato: “R$ X – Critério: ...”).
-   Campo "investimentoemti": Se houver benchmark setorial confiável, use-o (cite o critério). Caso contrário, use 2% do Faturamento estimado ou encontrado. Ex.: “R$ 100 mi/ano – Critério: 2% de R$ 100 mi, que seria R$ 2 mi de investimento anual em TI (bench genérico)”.
-   Campo "faturamento": Se houver valor confiável (relatório anual, imprensa, cadastro público), retorne “R$ X/ano (AAAA) – fonte: …”. Se NÃO houver fonte direta: ESTIME com critério explícito. Use uma ou mais heurísticas: (a) Funcionários × receita/func do setor, (b) notícias com faixa de receita, (c) comparação com pares do mesmo porte/segmento/local.
-   Campo "solucaofiscalouprovavel": Escolha entre { Thomson Reuters, Sovos, Solutio, Avalara, Guepardo, 4Tax, BPO fiscal, planilhas/house } com base em porte/ERP/segmento/custo/pesquisas na internet; explique em “criteriofiscal”.
-   Campo "erpatualouprovavel": escolha entre { SAP S/4HANA, SAP ECC, SAP Business One, Oracle NetSuite, TOTVS Protheus, Senior, Sankhya, Omie, “desenvolvimento próprio”, “outro ERP de nicho” } com base em porte/complexidade/segmento/ecossistema do país/noticias/pesquisa na internet; explique em “justificativaERP”.
-   Campo "ofensoremti": principal “pedra no sapato” interna para NÃO investir em TI (ex.: congelamento orçamentário, dívida técnica crítica, backlog, compliance/risco, prioridade em core, restrição de CAPEX/OPEX). 1 frase curta.
-   Campo "Compelling": razão convincente, orientada a resultado (ROI, risco evitado, eficiência, prazo regulatório etc.) que cria urgência. 1–2 frases, ligada às notícias/dor/faturamento atual. 
+### COBERTURA DE TODOS OS CAMPOS (OBRIGATÓRIA)
+1) FACTUAIS (preencha com fonte confiável; se não houver, esgote o orçamento antes de desistir):
+   - cnpj (matriz)
+   - telefonepublico (telefone institucional)
+   - mapa (URL do Google Maps da MATRIZ; se não achar, pode ser endereço)
+   - localização (UF/cidade da matriz)
+   - segmento e subsegmento
+   - fundacao (ano)
+2) NOTÍCIAS:
+   - "ultimas5noticias": 5 itens (≤24 meses) no formato { "titulo","data"(AAAA-MM-DD),"url","resumo"(≤25 palavras) }.
+3) ESTIMÁVEIS (quando não houver fonte direta, estimar COM CRITÉRIO EXPLÍCITO):
+   - funcionarios, faturamento, investimentoemti (usar benchmark setorial; se indisponível, 2% do faturamento)
+   - erpatualouprovavel (ex.: SAP/TOTVS/Senior/etc.) + justificativaERP
+   - solucaofiscalouprovavel (ex.: Thomson Reuters/Sovos/Avalara/etc.) + criteriofiscal
+4) E-MAILS (SEMPRE PREENCHER):
+   - modelodeemailti e modelodeemailfinanceiro: 120–180 palavras, personalizar com nomedaempresa/segmento/notícias/dor/compelling; terminar com CTA claro para conversa de 20 minutos nesta semana.
 
-
-
-COMO BUSCAR (padrões de consulta e inspeção de página)
-- Para telefone/contato no SITE: 
-  search: "site:{domínio} (contato OR 'fale conosco' OR atendimento OR telefone OR contato telefone)"
-  Dentro da página aberta, procure por: "telefone", "tel", "contato", "atendimento", "sac".
-- Para CNPJ:
-  search: "site:{domínio} (CNPJ OR 'dados legais' OR 'política de privacidade')"
-  Se não achar no site, search: "CNPJ \"{razão social}\" matriz"
-  Confirme por consistência de razão social e endereço.
-- Para Mapa (MATRIZ):
-  search: "site:google.com/maps {razão social} {cidade/UF}" 
-  Pegue a URL do perfil oficial da empresa; evite agregadores de mapas de terceiros.
-- Para Segmento/Subsegmento/Fundação:
-  search: "site:{domínio} (sobre OR 'quem somos' OR história OR institucional)"
-- Para notícias:
-  search: "{razão social} investimentos OR expansão OR contratações OR aquisição OR 'novo mercado'"
-
-REGRAS DE SAÍDA (TIPOS E FORMATO)
-- Nunca escreva "não encontrado".
-- Campos NÃO-ESTIMÁVEIS: valor real encontrado OU, somente após esgotar o orçamento, "em verificação".
-- Campos ESTIMÁVEIS: valor real OU valor estimado com critério (nunca vazio).
-- Tipos obrigatórios:
-  • STRING (nunca objeto): "nomedaempresa","Cnpj","Mapa","telefonepublico","segmento","Fundação","Subsegmento","criteriofiscal","Funcionarios","Faturamento","Localização","erpatualouprovavel","justificativaERP","solucaofiscalouprovavel","principaldordonegocio","investimentoemti","ofensoremti","modelodeemailti","modelodeemailfinanceiro","Compelling","gatilhocomercial","site".
-  • ARRAYS de objetos: 
-    - "ultimas5noticias": [{ "titulo","data","url","resumo" }]
-    - "organogramaclevel": [{ "nome","Cargo" }]
-    - "powermap": [{ "nome","cargo","classificacao","justificativa" }]
-- Datas AAAA-MM-DD. 
-E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
-  "ASSUNTO: <linha>"
-  <linha em branco>
-  <corpo 2–4 parágrafos, 120–180 palavras, personalizado com nomedaempresa/segmento/notícias/compelling/dor>
-  <linha em branco>
-  "Atenciosamente,
-  [Seu Nome]
-  [Seu Telefone]"
-- Saída: SOMENTE o JSON final.
-- Inclua um CTA claro para uma conversa de 20 minutos nesta semana.
-
-- Saída: SOMENTE o JSON final.
+### SAÍDA
+- Entregue SOMENTE o objeto JSON final, sem texto antes/depois e sem blocos \`\`\`.
+- Se um fato não existir publicamente após esgotar a busca, preencha com melhor estimativa e explique o critério no próprio campo relacionado (justificativa/criterio).
 `.trim();
 
     const oaiReq = {
       model: MODEL,
       tools: USE_WEB ? [{ type: "web_search" }] : [],
-      tool_choice: USE_WEB ? { type: "web_search" } : "none", // força a ferramenta
+      // força a ferramenta quando SEARCH_MODE=web
+      tool_choice: USE_WEB ? { type: "web_search" } : "none",
       input: [
         { role: "system", content: systemMsg },
         { role: "user",   content: prompt }
       ],
-      max_output_tokens: 4000
+      max_output_tokens: 4000,
+      temperature: 0
     };
 
     if (!USE_WEB) {
-      // JSON mode só sem web_search
+      // JSON mode só quando NÃO usamos web_search
       oaiReq.text = { format: { type: "json_object" } };
     }
 
-    // logs úteis
-    console.log("[/generate] model:", MODEL, "| USE_WEB:", USE_WEB, "| tool_choice:", JSON.stringify(oaiReq.tool_choice));
+    const response = await openai.responses.create(oaiReq);
 
-    // chamada com timeout (acabando com o 502-HTML)
-    let response;
-    try {
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
-      try {
-        response = await openai.responses.create(oaiReq, {
-          signal: ac.signal,
-          timeout: REQUEST_TIMEOUT_MS + 1000
-        });
-      } finally {
-        clearTimeout(timer);
-      }
-    } catch (err) {
-      const status = err?.status && Number.isInteger(err.status) ? err.status : 502;
-      console.error("OpenAI error:", status, err?.message || err);
-      return res.status(status).json({
-        error: "Upstream error",
-        detail: err?.message || String(err)
-      });
-    }
-
-    // ===== PARSE ROBUSTO + LOG DE RAW =====
-    const debug = DEBUG_RAW || req.query?.debug === "1" || req.body?.debug === true;
-
+    // ===== PARSE ROBUSTO (aceita preâmbulos, cercas ```json etc.) =====
     const raw = response.output_text || "";
-    console.log("[/generate] output_text length:", raw.length);
-
-    if (debug) {
-      // RAW completo
-      logLarge("RAW", raw);
-      // JSON da resposta (parcial) — para ver estruturas e tool_use
-      const respJson = safeStringify(response);
-      logLarge("RESPONSE JSON", respJson);
-      // Ferramentas detectadas
-      const toolsUsed = detectTools(response);
-      console.log("[/generate] tools detected:", toolsUsed.length ? JSON.stringify(toolsUsed) : "none");
-      // Usage (se disponível)
-      try {
-        console.log("[/generate] usage:", JSON.stringify(response.usage || {}, null, 2));
-      } catch {}
-    }
 
     const stripFences = s => String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
     const normalizeQuotes = s => String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
@@ -277,33 +162,25 @@ E-MAILS (modelodeemailti/modelodeemailfinanceiro): TEXTO COMPLETO, formato:
       jsonStr = repaired;
     }
 
+    // Fallback: pedir para o modelo reformatar em JSON válido (sem web_search)
     if (!obj) {
-      try {
-        const rehab = await openai.responses.create({
-          model: MODEL,
-          input: [
-            { role: "system", content: "Converta o conteúdo em UM ÚNICO objeto JSON válido. Preserve chaves/valores. Sem markdown." },
-            { role: "user", content: raw }
-          ],
-          text: { format: { type: "json_object" } },
-          max_output_tokens: 2000,
-          temperature: 0
-        });
-        const fixed = rehab.output_text || "{}";
-        obj = JSON.parse(fixed);
-      } catch (e) {
-        console.error("Resposta não-JSON:", raw.slice(0, 500));
-        return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0, 500) });
-      }
-    }
-
-    // (Opcional) quando debug estiver ativo, retornar payload com preview do RAW
-    if (debug) {
-      return res.json({
-        debug_raw_preview: raw.slice(0, 8000),
-        keys: Object.keys(obj),
-        data: obj
+      const rehab = await openai.responses.create({
+        model: MODEL,
+        input: [
+          {
+            role: "system",
+            content:
+              "Converta o conteúdo a seguir em UM ÚNICO objeto JSON válido. " +
+              "Preserve todas as chaves/valores. Não resuma. Saída: somente o JSON."
+          },
+          { role: "user", content: raw }
+        ],
+        text: { format: { type: "json_object" } },
+        max_output_tokens: 2000,
+        temperature: 0
       });
+      const fixed = rehab.output_text || "{}";
+      obj = JSON.parse(fixed);
     }
 
     return res.json(obj);
