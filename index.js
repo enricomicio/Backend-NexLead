@@ -159,25 +159,105 @@ if (!USE_WEB) {
 
 const response = await openai.responses.create(oaiReq);
 
+// ===== PARSE ROBUSTO + FALLBACK =====
+const raw = response.output_text || "";
 
-let raw = response.output_text || "{}";
+// helpers
+const stripFences = s => String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
+const normalizeQuotes = s => String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+const tryParse = s => { try { return JSON.parse(s); } catch { return null; } };
+const extractFirstJsonObject = (s) => {
+  if (!s) return null;
+  const text = String(s);
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+    } else {
+      if (ch === '"') inStr = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) return text.slice(start, i + 1);
+      }
+    }
+  }
+  return null;
+};
 
+// 1) limpar e tentar extrair só o 1º objeto JSON
+let cleaned = normalizeQuotes(stripFences(raw));
+let jsonStr = extractFirstJsonObject(cleaned) || cleaned;
 
-let obj;
-try {
-  obj = JSON.parse(raw);
-} catch (e1) {
-  const cleaned = raw.replace(/^\s*```json\s*|\s*```\s*$/g, "").trim();
+// 2) parse direto
+let obj = tryParse(jsonStr);
+
+// 3) reparo simples (vírgula solta antes de } ou ])
+if (!obj) {
+  const repaired = jsonStr.replace(/,\s*([}\]])/g, "$1");
+  obj = tryParse(repaired);
+  jsonStr = repaired;
+}
+
+// 4) fallback: pedir ao modelo para reformatar em JSON válido (SEM web_search)
+if (!obj) {
   try {
-    obj = JSON.parse(cleaned);
-  } catch (e2) {
-    console.error("Resposta não-JSON:", raw.slice(0, 300));
-    return res.status(502).json({ error: "Modelo não retornou JSON válido", raw: raw.slice(0,300) });
+    const rehab = await openai.responses.create({
+      model: MODEL,
+      input: [
+        {
+          role: "system",
+          content:
+            "Converta o conteúdo a seguir em UM ÚNICO objeto JSON válido. " +
+            "Preserve todas as chaves/valores. Não resuma. Saída: somente o JSON."
+        },
+        { role: "user", content: raw }
+      ],
+      text: { format: { type: "json_object" } }, // JSON mode permitido aqui
+      max_output_tokens: 2000,
+      temperature: 0
+    });
+    const fixed = rehab.output_text || "{}";
+    obj = JSON.parse(fixed);
+  } catch (e) {
+    // 5) plano C: nunca 502 — devolve um “esqueleto” mínimo
+    console.error("Resposta não-JSON:", raw.slice(0, 500));
+    obj = {
+      nomedaempresa: "",
+      cnpj: "",
+      mapa: "",
+      telefonepublico: "",
+      segmento: "",
+      fundacao: "",
+      subsegmento: "",
+      criteriofiscal: "",
+      funcionarios: "",
+      faturamento: "",
+      "localização": "",
+      erpatualouprovavel: "",
+      justificativaERP: "",
+      solucaofiscalouprovavel: "",
+      principaldordonegocio: "",
+      investimentoemti: "",
+      ofensoremti: "",
+      modelodeemailti: "",
+      modelodeemailfinanceiro: "",
+      ultimas5noticias: [],
+      Compelling: "",
+      gatilhocomercial: "",
+      site
+    };
   }
 }
 
-
+// pronto: sempre retorna JSON
 return res.json(obj);
+
           
 
     
