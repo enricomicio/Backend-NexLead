@@ -15,10 +15,10 @@ const openai = new OpenAI({
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 const USE_WEB = (process.env.SEARCH_MODE || "none").toLowerCase() === "web";
 
-// === DEBUG: deixe true para sempre logar; mude para false se quiser silenciar ===
+// === DEBUG: deixe true p/ logar RAW por padrão; troque p/ false se quiser silenciar ===
 const DEBUG_RAW = true;
 
-// Helpers de debug para logs grandes e detecção de ferramentas
+// ---- helpers de log e detecção de ferramentas ----
 function logLarge(label, text, chunk = 6000) {
   if (!text) return;
   console.log(`----- ${label} (len=${text.length}) BEGIN -----`);
@@ -55,9 +55,43 @@ function detectTools(resp) {
   return found;
 }
 
+// extrai host do site informado (sem protocolo e sem barra no final)
+function toHost(urlLike) {
+  try {
+    let s = String(urlLike || "").trim();
+    if (!s) return "";
+    if (!/^https?:\/\//i.test(s)) s = "https://" + s;
+    const u = new URL(s);
+    return u.host.toLowerCase();
+  } catch {
+    return String(urlLike || "").replace(/^https?:\/\//i, "").split("/")[0].toLowerCase();
+  }
+}
+function stripWWW(host) {
+  return host.replace(/^www\./i, "");
+}
+
 app.post("/generate", async (req, res) => {
   try {
     const { site } = req.body;
+    const host = toHost(site);
+    const base = stripWWW(host); // ex.: uol.com.br
+
+    // QUERIES obrigatórias — curtas, específicas, sem colar o prompt
+    const queriesObrigatorias = [
+      `site:${host} cnpj`,
+      `site:${host} "fale conosco" OR contato OR telefone`,
+      `site:${host} quem somos OR "sobre" OR institucional`,
+      `site:${host} "política de privacidade"`,
+      `"${base}" site:google.com/maps`,
+      `${base} LinkedIn employees`,
+      `${base} faturamento 2023 OR receita 2023`,
+      `${base} "número de funcionários"`,
+      `${base} ERP OR "sistema de gestão"`,
+      `${base} "solução fiscal" OR "software fiscal"`,
+      `${base} aquisição OR investimento OR expansão site:news.google.com`,
+      `${base} endereço`
+    ];
 
     const prompt = `
 Site informado: ${site}
@@ -106,46 +140,39 @@ Preencha exatamente este JSON (mantenha os tipos de cada campo) — SAÍDA: SOME
 Você é um agente que produz APENAS JSON válido (sem markdown, sem comentários, sem preâmbulos).
 Use EXATAMENTE as chaves do template acima (inclusive acentos, ex.: "localização").
 
-### REGRAS CRÍTICAS DE BUSCA (NÃO DESCUMPRA)
-- Ao chamar web_search, NUNCA envie o prompt completo ou o JSON no campo "query".
-- Cada query deve ter de 3 a 12 palavras, específica por tópico, por exemplo:
-  • "site:${site} contato telefone"
-  • "site:${site} cnpj"
-  • "site:google.com/maps {razão social} {cidade} {UF}"
-  • "site:${site} quem somos"
-  • "site:${site} política de privacidade"
-  • "{razão social} faturamento 2023"
-  • "{razão social} número de funcionários"
-  • "{razão social} ERP" / "{razão social} sistema fiscal"
-  • "{razão social} notícias expansão aquisição investimento"
-- Faça buscas MÚLTIPLAS e independentes para cobrir os fatos essenciais.
+### QUERIES OBRIGATÓRIAS
+A seguir há uma lista "QUERIES" já prontas. Você DEVE chamar "web_search" **uma vez para cada linha**, **exatamente como está**, sem adicionar, remover ou reordenar palavras, e **sem colar o prompt ou o JSON** no parâmetro "query". Não responda com o JSON final antes de executar TODAS as chamadas de busca.
+
+QUERIES:
+${queriesObrigatorias.map(q => `- ${q}`).join("\n")}
 
 ### COBERTURA DE TODOS OS CAMPOS (OBRIGATÓRIA)
-1) FACTUAIS (preencha com fonte confiável; se não houver, esgote o orçamento antes de desistir):
+1) FACTUAIS (preencher com fonte confiável; se não houver, esgote a busca antes de desistir):
    - cnpj (matriz)
-   - telefonepublico (telefone institucional)
-   - mapa (URL do Google Maps da MATRIZ; se não achar, pode ser endereço)
+   - telefonepublico
+   - mapa (preferencialmente URL do Google Maps da MATRIZ; se não achar, endereço completo)
    - localização (UF/cidade da matriz)
    - segmento e subsegmento
    - fundacao (ano)
-2) NOTÍCIAS:
-   - "ultimas5noticias": 5 itens (≤24 meses) no formato { "titulo","data"(AAAA-MM-DD),"url","resumo"(≤25 palavras) }.
-3) ESTIMÁVEIS (quando não houver fonte direta, estimar COM CRITÉRIO EXPLÍCITO):
+2) NOTÍCIAS (≤24 meses):
+   - "ultimas5noticias": 5 itens no formato { "titulo","data"(AAAA-MM-DD),"url","resumo"(≤25 palavras) }.
+3) ESTIMÁVEIS (quando não houver fonte direta, estimar COM CRITÉRIO EXPLÍCITO no próprio campo justificativo):
    - funcionarios, faturamento, investimentoemti (usar benchmark setorial; se indisponível, 2% do faturamento)
    - erpatualouprovavel (ex.: SAP/TOTVS/Senior/etc.) + justificativaERP
    - solucaofiscalouprovavel (ex.: Thomson Reuters/Sovos/Avalara/etc.) + criteriofiscal
 4) E-MAILS (SEMPRE PREENCHER):
-   - modelodeemailti e modelodeemailfinanceiro: 120–180 palavras, personalizar com nomedaempresa/segmento/notícias/dor/compelling; terminar com CTA claro para conversa de 20 minutos nesta semana.
+   - modelodeemailti e modelodeemailfinanceiro: 120–180 palavras, personalizados com nomedaempresa/segmento/notícias/dor/compelling; terminar com CTA claro para conversa de 20 minutos nesta semana.
 
 ### SAÍDA
 - Entregue SOMENTE o objeto JSON final, sem texto antes/depois e sem blocos \`\`\`.
-- Se um fato não existir publicamente após esgotar a busca, preencha com melhor estimativa e explique o critério no próprio campo relacionado (justificativa/criterio).
+- Se um fato não existir publicamente após esgotar a busca, preencha com melhor estimativa e explique o critério no próprio campo relacionado.
 `.trim();
 
     const oaiReq = {
       model: MODEL,
       tools: USE_WEB ? [{ type: "web_search" }] : [],
-      tool_choice: USE_WEB ? { type: "web_search" } : "none",
+      // deixamos "auto" p/ permitir múltiplas chamadas com as queries acima
+      tool_choice: USE_WEB ? "auto" : "none",
       input: [
         { role: "system", content: systemMsg },
         { role: "user",   content: prompt }
@@ -154,22 +181,20 @@ Use EXATAMENTE as chaves do template acima (inclusive acentos, ex.: "localizaç�
       temperature: 0
     };
 
-    // logs úteis iniciais
     console.log("[/generate] site:", site);
     console.log("[/generate] model:", MODEL, "| USE_WEB:", USE_WEB, "| tool_choice:", JSON.stringify(oaiReq.tool_choice));
 
     const response = await openai.responses.create(oaiReq);
 
-    // ===== LOG DO RAW E DA RESPOSTA COMPLETA =====
     const debug = DEBUG_RAW || req.query?.debug === "1" || req.body?.debug === true;
 
     const raw = response.output_text || "";
     console.log("[/generate] output_text length:", raw.length);
 
     if (debug) {
-      logLarge("RAW", raw); // texto completo que o modelo devolveu
+      logLarge("RAW", raw);
       const respJson = safeStringify(response);
-      logLarge("RESPONSE JSON", respJson); // estrutura completa (truncada se enorme)
+      logLarge("RESPONSE JSON", respJson);
       const toolsUsed = detectTools(response);
       console.log("[/generate] tools detected:", toolsUsed.length ? JSON.stringify(toolsUsed) : "none");
       try {
@@ -177,7 +202,7 @@ Use EXATAMENTE as chaves do template acima (inclusive acentos, ex.: "localizaç�
       } catch {}
     }
 
-    // ===== PARSE ROBUSTO (aceita preâmbulos, cercas ```json etc.) =====
+    // ===== PARSE ROBUSTO =====
     const stripFences = s => String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
     const normalizeQuotes = s => String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
     const tryParse = s => { try { return JSON.parse(s); } catch { return null; } };
@@ -215,7 +240,6 @@ Use EXATAMENTE as chaves do template acima (inclusive acentos, ex.: "localizaç�
       jsonStr = repaired;
     }
 
-    // Fallback: pedir para o modelo reformatar em JSON válido (sem web_search)
     if (!obj) {
       const rehab = await openai.responses.create({
         model: MODEL,
@@ -247,4 +271,3 @@ Use EXATAMENTE as chaves do template acima (inclusive acentos, ex.: "localizaç�
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
-
