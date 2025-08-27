@@ -15,6 +15,46 @@ const openai = new OpenAI({
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 const USE_WEB = (process.env.SEARCH_MODE || "none").toLowerCase() === "web";
 
+// === DEBUG: deixe true para sempre logar; mude para false se quiser silenciar ===
+const DEBUG_RAW = true;
+
+// Helpers de debug para logs grandes e detecção de ferramentas
+function logLarge(label, text, chunk = 6000) {
+  if (!text) return;
+  console.log(`----- ${label} (len=${text.length}) BEGIN -----`);
+  for (let i = 0; i < text.length; i += chunk) {
+    console.log(text.slice(i, i + chunk));
+  }
+  console.log(`----- ${label} END -----`);
+}
+function safeStringify(obj, limit = 120000) {
+  try {
+    const s = JSON.stringify(obj, null, 2);
+    return s.length > limit ? s.slice(0, limit) + "\n...[truncated]..." : s;
+  } catch {
+    return String(obj);
+  }
+}
+function detectTools(resp) {
+  const found = [];
+  try {
+    const j = JSON.parse(JSON.stringify(resp));
+    const scan = (node) => {
+      if (!node || typeof node !== "object") return;
+      const t = (node.type || "").toString().toLowerCase();
+      if (t.includes("tool") || t.includes("web_search")) {
+        found.push({
+          type: node.type || "unknown",
+          name: node.tool_name || node.name || (node.action && node.action.type) || "unknown"
+        });
+      }
+      for (const k in node) scan(node[k]);
+    };
+    scan(j);
+  } catch {}
+  return found;
+}
+
 app.post("/generate", async (req, res) => {
   try {
     const { site } = req.body;
@@ -105,7 +145,6 @@ Use EXATAMENTE as chaves do template acima (inclusive acentos, ex.: "localizaç�
     const oaiReq = {
       model: MODEL,
       tools: USE_WEB ? [{ type: "web_search" }] : [],
-      // força a ferramenta quando SEARCH_MODE=web
       tool_choice: USE_WEB ? { type: "web_search" } : "none",
       input: [
         { role: "system", content: systemMsg },
@@ -115,16 +154,30 @@ Use EXATAMENTE as chaves do template acima (inclusive acentos, ex.: "localizaç�
       temperature: 0
     };
 
-    if (!USE_WEB) {
-      // JSON mode só quando NÃO usamos web_search
-      oaiReq.text = { format: { type: "json_object" } };
-    }
+    // logs úteis iniciais
+    console.log("[/generate] site:", site);
+    console.log("[/generate] model:", MODEL, "| USE_WEB:", USE_WEB, "| tool_choice:", JSON.stringify(oaiReq.tool_choice));
 
     const response = await openai.responses.create(oaiReq);
 
-    // ===== PARSE ROBUSTO (aceita preâmbulos, cercas ```json etc.) =====
-    const raw = response.output_text || "";
+    // ===== LOG DO RAW E DA RESPOSTA COMPLETA =====
+    const debug = DEBUG_RAW || req.query?.debug === "1" || req.body?.debug === true;
 
+    const raw = response.output_text || "";
+    console.log("[/generate] output_text length:", raw.length);
+
+    if (debug) {
+      logLarge("RAW", raw); // texto completo que o modelo devolveu
+      const respJson = safeStringify(response);
+      logLarge("RESPONSE JSON", respJson); // estrutura completa (truncada se enorme)
+      const toolsUsed = detectTools(response);
+      console.log("[/generate] tools detected:", toolsUsed.length ? JSON.stringify(toolsUsed) : "none");
+      try {
+        console.log("[/generate] usage:", JSON.stringify(response.usage || {}, null, 2));
+      } catch {}
+    }
+
+    // ===== PARSE ROBUSTO (aceita preâmbulos, cercas ```json etc.) =====
     const stripFences = s => String(s).replace(/^\s*```json\s*|\s*```\s*$/gi, "").trim();
     const normalizeQuotes = s => String(s).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
     const tryParse = s => { try { return JSON.parse(s); } catch { return null; } };
@@ -194,3 +247,4 @@ Use EXATAMENTE as chaves do template acima (inclusive acentos, ex.: "localizaç�
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
+
