@@ -127,19 +127,19 @@ Você **PODE** usar web_search sempre que precisar de informação externa e dev
 - **investimentoemti**: se houver benchmark setorial, use-o (cite o critério).
   - Caso contrário, **2% do faturamento** (em **R$**). Se o faturamento estiver em USD, **converta** primeiro usando **câmbio 5,0 BRL/USD** e explique: "Critério: 2% de R$ {faturamento convertido}".
   - Formato textual único (string), claro e auditável.
-- **ofensoremti**: 1 frase com a principal barreira orçamentária para que essa empresa não invista em TI agora (ex.: congelamento orçamentário, dívida técnica, backlog, CAPEX/OPEX).
+- **ofensoremti**: 1 frase com a principal barreira interna ou externa, que dificulte o investimento em tecnologia (ex.: congelamento orçamentário, dívida técnica, backlog, CAPEX/OPEX).
 - **ultimas5noticias**: **5 itens** dos últimos **24 meses** **relacionados a crescimento, expansão, investimentos, tecnologia, M&A, parcerias, CAPEX/OPEX, resultados** — **evite** matérias opinativas/editoriais.
   - Cada item: { "titulo", "data" (AAAA-MM-DD), "url", "resumo" (≤ 25 palavras) }.
   - Itens **distintos** e de fontes confiáveis; evitar duplicatas; priorizar fatos que **sustentem investimento em TI**.
 - **modelodeemailti** e **modelodeemailfinanceiro**: **texto completo** com o formato:
   "ASSUNTO: <linha>"
   <linha em branco>
-  <corpo 2–4 parágrafos, 120–180 palavras, **personalizado** com nomedaempresa/segmento/uma ou mais notícias/“Compelling”/dor > 
+  <corpo 2–4 parágrafos, 120–180 palavras(imaginando que sou de uma consultoria de TI e quero agendar uma reunião de 20 minutos), **personalizado** com nomedaempresa/segmento/uma ou mais notícias/“Compelling”/dor > 
   <linha em branco>
   "Atenciosamente,
   [Seu Nome]
   [Seu Telefone]"
-  - **Inclua CTA** claro para uma conversa de 20 minutos, sem esquecer que este e-mail deve ser um e-mail de geração de demanda, em que o foco é conseguir 20 minutos da empresa em questão, para que o usuário deste PROMT possa apresentar sua empresa **esta semana**.
+  - **Inclua CTA** claro para uma conversa de 20 minutos **esta semana**.
 - **Compelling**: 1–2 frases orientadas a ROI/risco/eficiência/prazo regulatório, conectadas às notícias/dor/faturamento, que juntas se transformem no Compelling para investimento em TI.
 - **gatilhocomercial**: 1–2 frases com time-to-value/urgência (janela regulatória, pico sazonal, corte de custos)que resultem em um gatilho comercial poderoso para instigar um possível investimento em tecnologia.
 - **organogramaclevel**: preencha nomes quando houver fonte; caso contrário deixe vazio, mas **tente** ao menos o CEO/CFO.
@@ -212,8 +212,8 @@ Você completa um **JSON existente**. Use **web_search** e preencha **todos** os
 - Notícias: 5 itens (24 meses) focados em crescimento/expansão/tecnologia/finanças, cada um com {titulo,data AAAA-MM-DD,url,resumo ≤ 25 palavras}.
 - "mapa": **URL do Google Maps da MATRIZ**, não endereço textual.
 - E-mails (TI/Financeiro): 120–180 palavras, personalizados com empresa/segmento/notícias/Compelling/dor, CTA de 20 minutos, e sem esquecer que este e-mail deve ser um e-mail de geração de demanda, em que o foco é conseguir 20 minutos da empresa em questão, para que o usuário deste PROMT possa apresentar sua empresa.
-- "investimentoemti": benchmark setorial; se ausente, **2% do faturamento em R$** (se faturamento estiver em USD, **converta com 5,0 BRL/USD** e explique).
-- ERP/fiscal: escolha provável com **critério** e justificativa clara.
+- "investimentoemti": benchmark setorial; se ausente, **2% do faturamento em R$** (se faturamento estiver em USD, **converta com 5,0 BRL/USD**, explique e seja conservador).
+- ERP/fiscal: escolha provável com **critério** e justificativa clara do motivo dessas soluções serem plausíveis para essa empresa.
 - Para factuais sem fonte mesmo após buscar, use "em verificação". Para estimáveis, **preencha** com critério explícito.
 
 ⚠️ Saída: **apenas** o JSON final, sem markdown, começando em "{" e terminando em "}".
@@ -231,7 +231,7 @@ Complete **todos** os campos acima **sem remover** dados já corretos.
 Lembre-se de: 
 - manter "mapa" como URL do Google Maps da MATRIZ,
 - montar 5 notícias 100% ligadas a crescimento/expansão/tecnologia/finanças (não opinião),
-- produzir e-mails TI/Financeiro completos (120–180 palavras) com CTA de 20 minutos,
+- produzir e-mails TI/Financeiro completos (120–180 palavras) imaginando que sou de uma consultoria de TI e desejo uma reunião de 20 minutos,
 - justificar estimativas (funcionários, faturamento, ERP, fiscal, investimentoemti),
 - converter USD→BRL a 5,0 quando necessário (explicando no texto de "faturamento" e no "investimentoemti").
 
