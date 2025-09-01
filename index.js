@@ -122,12 +122,12 @@ Você **PODE** usar web_search sempre que precisar de informação externa e dev
   - Se a fonte estiver em **USD**, retorne **ambos**: "US$ X (AAAA) ≈ R$ Y – câmbio 5,0 BRL/USD – fonte: ...".
   - Se **não** houver fonte direta, **estime** com critério explícito (receita/funcionário do setor × funcionários; comparação com pares; faixas de imprensa).
 - **erpatualouprovavel**: escolha entre { SAP S/4HANA, SAP ECC, SAP Business One, Oracle NetSuite, TOTVS Protheus, Senior, Sankhya, Omie, desenvolvimento próprio, outro ERP de nicho } com base em porte/segmento/notícias/ecossistema. Explique em **justificativaERP** de forma sucinta e factual.
-- **solucaofiscalouprovavel**: escolha entre { Thomson Reuters, Sovos, Solutio, Avalara, Guepardo, 4Tax, BPO fiscal, planilhas/house } com critério em **criteriofiscal** (porte/ERP/segmento/custo/notícias).
+- **solucaofiscalouprovavel**: escolha entre { Thomson Reuters, Sovos, Solutio, Avalara, Guepardo, 4Tax, BPO fiscal, planilhas/house } com critério do motivo desta solução fiscal ser selecionada ou estimada,  em **criteriofiscal** (porte/ERP/segmento/custo/notícias).
 - **principaldordonegocio**: 1–2 frases sobre dores relevantes (ex.: eficiência operacional, compliance, escalabilidade, SLAs, omnichannel, prazos regulatórios).
 - **investimentoemti**: se houver benchmark setorial, use-o (cite o critério).
   - Caso contrário, **2% do faturamento** (em **R$**). Se o faturamento estiver em USD, **converta** primeiro usando **câmbio 5,0 BRL/USD** e explique: "Critério: 2% de R$ {faturamento convertido}".
   - Formato textual único (string), claro e auditável.
-- **ofensoremti**: 1 frase com o principal bloqueador (ex.: congelamento orçamentário, dívida técnica, backlog, CAPEX/OPEX).
+- **ofensoremti**: 1 frase com o principal motivo do porque essa empresa poderia evitar investimentos em TI (ex.: congelamento orçamentário, dívida técnica, backlog, CAPEX/OPEX).
 - **ultimas5noticias**: **5 itens** dos últimos **24 meses** **relacionados a crescimento, expansão, investimentos, tecnologia, M&A, parcerias, CAPEX/OPEX, resultados** — **evite** matérias opinativas/editoriais.
   - Cada item: { "titulo", "data" (AAAA-MM-DD), "url", "resumo" (≤ 25 palavras) }.
   - Itens **distintos** e de fontes confiáveis; evitar duplicatas; priorizar fatos que **sustentem investimento em TI**.
@@ -139,9 +139,9 @@ Você **PODE** usar web_search sempre que precisar de informação externa e dev
   "Atenciosamente,
   [Seu Nome]
   [Seu Telefone]"
-  - **Inclua CTA** claro para uma conversa de 20 minutos **esta semana**.
-- **Compelling**: 1–2 frases orientadas a ROI/risco/eficiência/prazo regulatório, conectadas às notícias/dor/faturamento.
-- **gatilhocomercial**: 1–2 frases com time-to-value/urgência (janela regulatória, pico sazonal, corte de custos).
+  - **Inclua CTA** claro para uma conversa de 20 minutos, sendo que o objetivo dessa conversa é demonstrar como podemos apoiar essa empresa, no que diz respeito a inovação, ganho de eficiencia e redução de custos **esta semana**.
+- **Compelling**: 1–2 frases orientadas a ROI/risco/eficiência/prazo regulatório, conectadas às notícias/dor/faturamento, que juntas se transformem no Compelling para investimento em TI.
+- **gatilhocomercial**: 1–2 frases com time-to-value/urgência (janela regulatória, pico sazonal, corte de custos)que resultem em um gatilho comercial poderoso para instigar um possível investimento em tecnologia.
 - **organogramaclevel**: preencha nomes quando houver fonte; caso contrário deixe vazio, mas **tente** ao menos o CEO/CFO.
   - Mantenha a chave "Cargo" **exatamente** com maiúscula (conforme o schema).
 - **powermap**: 3 itens: Decisor, Influenciador, Barreira. Use nomes reais quando possível com **justificativa** breve (fonte/indício). Se não houver, deixe nomes vazios mas mantenha as classificações.
