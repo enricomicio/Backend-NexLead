@@ -2,6 +2,7 @@
 const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
+const { buildTop3 } = require("./scoring"); // <<< NOVO
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -307,6 +308,14 @@ app.post("/generate", async (req, res) => {
     }
 
     if (!missingOrWeak.length) {
+      // >>> NOVO: top3 antes de retornar
+      try {
+        const { erp_top3, fiscal_top3 } = buildTop3(obj1);
+        obj1.erp_top3 = erp_top3;
+        obj1.fiscal_top3 = fiscal_top3;
+      } catch (e) {
+        console.log("[scoring] erro:", e?.message || e);
+      }
       return res.json(obj1);
     }
 
@@ -358,6 +367,16 @@ app.post("/generate", async (req, res) => {
     }
 
     const finalObj = { ...obj1, ...(obj2 || {}) };
+
+    // >>> NOVO: calcula e anexa Top 3 de ERP e Fiscal
+    try {
+      const { erp_top3, fiscal_top3 } = buildTop3(finalObj);
+      finalObj.erp_top3 = erp_top3;
+      finalObj.fiscal_top3 = fiscal_top3;
+    } catch (e) {
+      console.log('[scoring] falhou ao gerar top3:', e?.message || e);
+    }
+
     return res.json(finalObj);
 
   } catch (error) {
