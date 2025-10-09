@@ -2,7 +2,7 @@
 const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
-const { buildTop3 } = require("./scoring"); // <<< NOVO
+const { buildTop3 } = require("./scoring/scoring");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
