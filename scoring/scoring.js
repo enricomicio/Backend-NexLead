@@ -48,46 +48,46 @@ const parseMoneyBR = (raw) => {
   return Number.isFinite(base) ? base * mult : 0;
 };
 
-/* =============== Extração de evidências textuais com origem =============== */
-function collectTextFields(rel) {
+/* =============== Coleta de textos (exclui campos viciados) =============== */
+function collectEvidenceSources(rel) {
   const out = [];
   const push = (key, val) => { if (val) out.push({ key, text: String(val) }); };
 
-  // campos diretos
+  // usamos: empresa, setor, dor, compelling, gatilho, site, funcionários, faturamento
   push('nomedaempresa', rel?.nomedaempresa);
   push('segmento', rel?.segmento);
   push('subsegmento', rel?.subsegmento);
+  push('principaldordonegocio', rel?.principaldordonegocio);
+  push('Compelling', rel?.Compelling);
+  push('gatilhocomercial', rel?.gatilhocomercial);
+  push('site', rel?.site);
   push('funcionarios', rel?.funcionarios);
   push('faturamento', rel?.faturamento);
-  push('justificativaERP', rel?.justificativaERP);
-  push('criteriofiscal', rel?.criteriofiscal);
-  push('erpatualouprovavel', rel?.erpatualouprovavel);
-  push('solucaofiscalouprovavel', rel?.solucaofiscalouprovavel);
-  push('principaldordonegocio', rel?.principaldordonegocio);
-  push('investimentoemti', rel?.investimentoemti);
-  // notícias (título + resumo)
+
+  // notícias (título + resumo + data)
   (rel?.ultimas5noticias || []).forEach((n, i) => {
-    if (!n) return;
-    if (typeof n === 'string') push(`ultimas5noticias[${i}]`, n);
-    else {
-      push(`ultimas5noticias[${i}].titulo`, n.titulo || n.title);
-      push(`ultimas5noticias[${i}].resumo`, n.resumo || n.summary);
+    const data = n?.data || n?.date || '';
+    if (typeof n === 'string') {
+      out.push({ key: `noticia[${i}] ${data}`, text: n });
+    } else {
+      if (n?.titulo || n?.title) out.push({ key: `noticia[${i}] ${data}`, text: n.titulo || n.title });
+      if (n?.resumo || n?.summary) out.push({ key: `noticia[${i}] ${data}`, text: n.resumo || n.summary });
     }
   });
 
+  // NÃO usamos: erpatualouprovavel, justificativaERP, solucaofiscalouprovavel, criteriofiscal
   return out;
 }
 
 function findMatches(rel, keywordList) {
-  const hay = collectTextFields(rel);
+  const hay = collectEvidenceSources(rel);
   const res = [];
-  const needles = keywordList.map(k => String(k).toLowerCase());
+  const needles = (keywordList || []).map(k => String(k).toLowerCase());
   hay.forEach(({ key, text }) => {
     const low = text.toLowerCase();
     needles.forEach(n => {
       const idx = low.indexOf(n);
       if (idx >= 0) {
-        // recorte de contexto (±30 chars)
         const start = Math.max(0, idx - 30);
         const end = Math.min(text.length, idx + n.length + 30);
         const snippet = text.substring(start, end).replace(/\s+/g, ' ').trim();
@@ -98,32 +98,27 @@ function findMatches(rel, keywordList) {
   return res;
 }
 
-/* =============== Sinais derivados do relatório =============== */
-function deriveSignals(data) {
-  const text = JSON.stringify(data || {}).toLowerCase();
-  const seg = ([(data?.segmento||''), (data?.subsegmento||'')].join(' ')).toLowerCase();
-  const employees = parseEmployees(data?.funcionarios);
-  const revenue = parseMoneyBR(data?.faturamento);
+/* =============== Sinais derivados (sem “hint” de ERP/Fiscal) =============== */
+function deriveSignals(rel) {
+  const text = JSON.stringify(rel || {}).toLowerCase();
+  const seg = ([(rel?.segmento||''), (rel?.subsegmento||'')].join(' ')).toLowerCase();
+  const employees = parseEmployees(rel?.funcionarios);
+  const revenue = parseMoneyBR(rel?.faturamento);
   const has = (re) => re.test(text) || re.test(seg);
 
-  // Stacks
+  // Stacks / integrações
   const hasAzure   = has(/azure|microsoft|power\s*bi|office\s*365|dynamics/);
   const hasAws     = has(/\baws\b|amazon web services/);
-  const hasGcp     = has(/\bgcp\b|google cloud|bigquery|looker/);
-
-  const hasSap     = has(/\bsap\b|abap|s\/?4hana|sap\s+hana|sap\s+ecc|business\s+one/);
-  const hasTotvs   = has(/\btotvs\b|protheus|\brm\b|datasul|advpl/);
-  const hasOracle  = has(/\boracle\b|netsuite/);
-
+  const hasGcp     = has(/google cloud|gcp|bigquery|looker/);
   const hasSalesforce = has(/salesforce|crm cloud/);
-  const hasEcom       = has(/e-?commerce|loja\s*virtual|marketplace|magento|vtex|shopify|woocommerce/);
-  const hasWmsTms     = has(/\bwms\b|\btms\b|log(í|i)stica|armaz(é|e)m/);
 
   // Segmentos/necessidades
   const manuf        = has(/manufatura|ind(ú|u)stria|f(á|a)brica|produção/);
   const serviços     = has(/servi(ç|c)os|bpo|consultoria/);
   const alimentos    = has(/alimentos|food|bebidas|frigor(í|i)fico/);
   const varejo       = has(/varejo|retail|atacado|distribui(ç|c)(ã|a)o/);
+  const hasEcom      = has(/e-?commerce|loja\s*virtual|marketplace|magento|vtex|shopify|woocommerce/);
+  const hasWmsTms    = has(/\bwms\b|\btms\b|log(í|i)stica|armaz(é|e)m/);
 
   const multiempresa = has(/holding|consolida(ç|c)(ã|a)o|multi-?empresa|multi-?entidade/);
   const multiMoeda   = has(/multi-?moeda|moedas|c(â|a)mbio|fx|usd|eur/);
@@ -133,28 +128,21 @@ function deriveSignals(data) {
   const onPrem       = has(/on-?prem|data\s*center\s*pr(ó|o)prio|servidores?\s*locais?/);
   const legacy       = has(/legado|sistema\s*pr(ó|o)prio|desenvolvimento\s*pr(ó|o)prio|casa/);
 
-  const hintedERP    = String(data?.erpatualouprovavel || '').toLowerCase();
-  const hintedFiscal = String(data?.solucaofiscalouprovavel || '').toLowerCase();
-
   return {
     text, seg, employees, revenue,
-    hasAzure, hasAws, hasGcp,
-    hasSap, hasTotvs, hasOracle,
-    hasSalesforce, hasEcom, hasWmsTms,
-    manuf, serviços, alimentos, varejo,
+    hasAzure, hasAws, hasGcp, hasSalesforce,
+    manuf, serviços, alimentos, varejo, hasEcom, hasWmsTms,
     multiempresa, multiMoeda, multiPais,
-    cloudSaaS, onPrem, legacy,
-    hintedERP, hintedFiscal
+    cloudSaaS, onPrem, legacy
   };
 }
 
-/* =============== Helpers de razões fortes =============== */
+/* =============== Helpers de razões (explicativas) =============== */
 function pickTopReasons(reasons, max = 5) {
-  // remove duplicadas e mantém prioridade dada pela ordem de push
   const seen = new Set();
   const out = [];
   for (const r of reasons) {
-    const key = r.kind + '|' + r.text;
+    const key = r.text; // dedup por texto final para evitar repetição
     if (!seen.has(key)) {
       seen.add(key);
       out.push(r);
@@ -164,136 +152,109 @@ function pickTopReasons(reasons, max = 5) {
   return out;
 }
 
-function reasonsToStrings(reasons) {
-  return reasons.map(r => r.text);
-}
-
 function composeWhyShort(reasons) {
   if (!reasons.length) return '';
   const tops = reasons.slice(0, 2).map(r => r.text);
   return tops.join(' • ');
 }
 
-/* =============== ERP Scoring =============== */
+/* =============== Score ERP (sem “hint”) =============== */
 function scoreERP(c, s, rel) {
   let score = 0;
   const reasons = [];
   const criteria = [];
+  const add = (pts, text, crit) => { if (pts>0){ score+=pts; reasons.push({text}); criteria.push(crit);} };
 
-  const push = (pts, text, kind) => {
-    if (pts <= 0) return;
-    score += pts;
-    reasons.push({ text, kind });
-    criteria.push(kind);
-  };
-
-  // Evidência textual com origem
+  // 1) Evidência textual pública (notícias/descrições)
   const kwMatches = findMatches(rel, c.keywords || []);
   if (kwMatches.length) {
     const ex = kwMatches[0];
-    push(40, `mencionado em ${ex.key} (“${ex.snippet}”)`, 'evidencia');
+    add(42, `Mencionado em ${ex.key}: “${ex.snippet}”`, 'evidência pública');
   }
 
-  // Se o próprio relatório já “sugeriu” algo coerente
-  if (s.hintedERP && c.name.toLowerCase().includes(s.hintedERP.split(' ')[0])) {
-    push(18, 'indício direto no relatório', 'hint');
-  }
-
-  // Porte por funcionários
-  const emp = s.employees;
+  // 2) Porte por funcionários
+  const e = s.employees;
   const inRange =
-    (c.sizeHint?.minEmp ? emp >= c.sizeHint.minEmp : true) &&
-    (c.sizeHint?.maxEmp ? emp <= c.sizeHint.maxEmp : true);
-  if (emp > 0 && inRange) push(14, `porte compatível (~${emp.toLocaleString('pt-BR')} funcionários)`, 'porte');
-  if (emp > 1500 && c.tier === 'enterprise') push(6, 'tier enterprise', 'enterprise');
-  if (emp > 0 && emp < 300 && c.tier === 'smb') push(6, 'tier SMB', 'smb');
+    (c.sizeHint?.minEmp ? e >= c.sizeHint.minEmp : true) &&
+    (c.sizeHint?.maxEmp ? e <= c.sizeHint.maxEmp : true);
+  if (e > 0 && inRange) add(16, `Porte compatível (~${e.toLocaleString('pt-BR')} funcionários)`, 'porte');
+  if (e > 1500 && c.tier === 'enterprise') add(6, 'Tier enterprise combina com porte', 'porte');
+  if (e > 0 && e < 300 && c.tier === 'smb') add(6, 'Foco SMB combina com porte', 'porte');
 
-  // Necessidades/segmentos
-  if (s.multiempresa && c.tags.includes('multiempresa')) push(8, 'holding/múltiplas entidades', 'multiempresa');
-  if (s.multiMoeda   && c.tags.includes('multi-moeda')) push(6, 'operações multi-moeda', 'moeda');
-  if (s.multiPais    && c.tags.includes('multi-país')) push(6, 'operações em vários países', 'pais');
+  // 3) Necessidades claras (explicadas)
+  if (s.multiempresa && c.tags.includes('multiempresa')) add(8, 'Estrutura de holding/múltiplas entidades citada — requer consolidação robusta', 'multiempresa');
+  if (s.multiMoeda   && c.tags.includes('multi-moeda')) add(6, 'Operações em múltiplas moedas mencionadas — exige suporte nativo a FX', 'multi-moeda');
+  if (s.multiPais    && c.tags.includes('multi-país'))  add(6, 'Atuação em mais de um país — importante fiscalidade/legislação multi-país', 'multi-país');
 
-  if (s.cloudSaaS && (c.tags.includes('saas') || c.tags.includes('cloud'))) push(6, 'preferência por cloud/SaaS', 'cloud');
-  if (s.onPrem    && c.tags.includes('on-prem')) push(4, 'ambiente on-premises', 'onprem');
-  if (s.legacy    && c.tags.includes('migração')) push(4, 'cenário de migração/legado', 'legado');
+  if (s.cloudSaaS && (c.tags.includes('saas') || c.tags.includes('cloud'))) add(6, 'Preferência por SaaS/Cloud aparece no material', 'cloud');
+  if (s.onPrem    && c.tags.includes('on-prem')) add(4, 'Cenário on-premises citado — plataforma compatível', 'on-prem');
+  if (s.legacy    && c.tags.includes('migração')) add(4, 'Legado/migração mencionados — produto com trilha de migração', 'migração');
 
-  if (s.hasAzure   && c.tags.includes('azure'))     push(6, 'stack Microsoft/Azure', 'azure');
-  if (s.hasAws     && c.tags.includes('aws'))       push(4, 'integração AWS', 'aws');
-  if (s.hasGcp     && c.tags.includes('gcp'))       push(4, 'integração Google Cloud', 'gcp');
-  if (s.hasSalesforce && c.tags.includes('crm'))    push(3, 'CRM pré-existente (Salesforce/CRM)', 'crm');
-  if (s.hasWmsTms  && c.tags.includes('logística')) push(3, 'integrações WMS/TMS', 'logistica');
+  if (s.hasAzure   && c.tags.includes('azure'))     add(6, 'Stack Microsoft/Azure presente — sinergia técnica', 'stack');
+  if (s.hasAws     && c.tags.includes('aws'))       add(4, 'Uso/menção de AWS — integração favorável', 'stack');
+  if (s.hasGcp     && c.tags.includes('gcp'))       add(3, 'Uso/menção de Google Cloud — integração possível', 'stack');
+  if (s.hasSalesforce && c.tags.includes('crm'))    add(3, 'CRM (Salesforce/afins) citado — conectores maduros', 'crm');
+  if (s.hasWmsTms  && c.tags.includes('logística')) add(3, 'Indícios de WMS/TMS/logística — ERP forte em cadeia logística', 'logística');
 
-  if (s.manuf      && c.tags.includes('manufatura'))      push(5, 'manufatura', 'segmento');
-  if (s.varejo     && (c.tags.includes('distribuição') || c.tags.includes('varejo'))) push(4, 'varejo/distribuição', 'segmento');
-  if (s.alimentos  && c.tags.includes('manufatura'))      push(3, 'alimentos/bebidas', 'segmento');
-  if (s.serviços   && c.tags.includes('serviços'))        push(3, 'serviços/BPO', 'segmento');
-  if (s.hasEcom    && c.tags.includes('e-commerce'))      push(4, 'e-commerce/marketplace', 'ecom');
+  if (s.manuf      && c.tags.includes('manufatura'))      add(5, 'Atuação industrial — módulos de manufatura aderentes', 'segmento');
+  if (s.varejo     && (c.tags.includes('distribuição') || c.tags.includes('varejo'))) add(4, 'Varejo/distribuição — processos de vendas e estoque', 'segmento');
+  if (s.alimentos  && c.tags.includes('manufatura'))      add(3, 'Alimentos/bebidas — requisitos de lote/qualidade', 'segmento');
+  if (s.serviços   && c.tags.includes('serviços'))        add(3, 'Serviços/BPO — projetos, faturamento e centros de custo', 'segmento');
+  if (s.hasEcom    && c.tags.includes('e-commerce'))      add(4, 'E-commerce/marketplace — integrações nativas', 'e-commerce');
 
-  // Sinergias óbvias
-  if (s.hasSap    && c.name.toLowerCase().includes('sap'))      push(10, 'sinais fortes de SAP', 'sap');
-  if (s.hasTotvs  && c.name.toLowerCase().includes('totvs'))    push(10, 'sinais fortes de TOTVS', 'totvs');
-  if (s.hasOracle && c.name.toLowerCase().includes('netsuite')) push(8,  'sinais de NetSuite/Oracle', 'oracle');
-
-  // Seleciona razões mais fortes (sem repetições)
-  const topReasons = pickTopReasons(reasons, 5);
+  // 4) Limita razões e calcula score
+  const top = pickTopReasons(reasons, 5);
   const confidence = clamp(Math.round(score), 15, 95);
-
   return {
     name: c.name,
     confidence_pct: confidence,
-    why: reasonsToStrings(topReasons),
-    whyShort: composeWhyShort(topReasons),
+    why: top.map(r => r.text),
+    whyShort: composeWhyShort(top),
     criteria: uniq(criteria),
   };
 }
 
-/* =============== Fiscal Scoring =============== */
+/* =============== Score Fiscal (sem “hint”) =============== */
 function scoreFiscal(c, s, rel, erpTop1Name='') {
   let score = 0;
   const reasons = [];
   const criteria = [];
-  const push = (pts, text, kind) => { if (pts>0){ score+=pts; reasons.push({text,kind}); criteria.push(kind);} };
+  const add = (pts, text, crit) => { if (pts>0){ score+=pts; reasons.push({text}); criteria.push(crit);} };
 
-  // Evidência textual com origem
+  // 1) Evidência pública
   const kwMatches = findMatches(rel, c.keywords || []);
   if (kwMatches.length) {
     const ex = kwMatches[0];
-    push(34, `mencionado em ${ex.key} (“${ex.snippet}”)`, 'evidencia');
+    add(30, `Mencionado em ${ex.key}: “${ex.snippet}”`, 'evidência pública');
   }
 
-  if (s.hintedFiscal && c.name.toLowerCase().includes(s.hintedFiscal.split(' ')[0])) {
-    push(18, 'indício direto no relatório', 'hint');
-  }
+  // 2) Porte e complexidade fiscal
+  const e = s.employees;
+  if (e > 1500 && c.tier === 'enterprise') add(10, 'Porte grande — obrigações acessórias complexas', 'porte');
+  if (e > 0 && e < 200 && c.tier === 'smb') add(8, 'Porte SMB — solução enxuta compensa', 'porte');
 
-  // Porte
-  const emp = s.employees;
-  if (emp > 1500 && c.tier === 'enterprise') push(10, 'porte grande/complexo', 'porte');
-  if (emp > 0 && emp < 200 && c.tier === 'smb') push(8, 'adequado a SMB', 'smb');
+  // 3) Necessidades fiscais claras
+  if (s.multiPais && /sovos|thomson|guepardo|4tax/i.test(c.name)) add(8, 'Atuação em vários países — compliance multinacional', 'multi-país');
+  if (s.multiMoeda && /sovos|thomson|guepardo/i.test(c.name)) add(6, 'Multi-moeda/FX — apuração e integrações fiscais', 'multi-moeda');
+  if (s.hasEcom && /avalara|nfe\.io/i.test(c.name)) add(7, 'E-commerce/NF-e — gateways fiscais prontos', 'e-commerce');
+  if (s.manuf && /guepardo|thomson|4tax/i.test(c.name)) add(5, 'Indústria — SPED/Blocos e créditos de ICMS/PIS/COFINS', 'manufatura');
 
-  // Sinergia com ERP top-1
-  const e = (erpTop1Name || '').toLowerCase();
-  if (e.includes('sap')) {
-    if (/(thomson|mastersaf|guepardo|sovos|4tax)/i.test(c.name)) push(12, 'sinergia com SAP', 'sap');
-  } else if (e.includes('totvs')) {
-    if (/(4tax|synchro|thomson|mastersaf|sovos)/i.test(c.name))  push(10, 'sinergia com TOTVS', 'totvs');
-  } else if (e.includes('dynamics') || e.includes('netsuite')) {
-    if (/(avalara|thomson|sovos)/i.test(c.name))                 push(8,  'sinergia com ERP cloud', 'cloud');
-  } else if (e.includes('omie') || e.includes('tiny')) {
-    if (/(nfe\.io|bpo|planilhas)/i.test(c.name))                 push(10, 'stack leve p/ SMB', 'smb');
-  }
+  // 4) Sinergia com stack de TI (não usa “hint” antigo)
+  const e1 = (erpTop1Name || '').toLowerCase();
+  if (e1.includes('sap') && /(thomson|mastersaf|guepardo|sovos|4tax)/i.test(c.name))
+    add(6, 'ERP com perfil enterprise — conectores maduros', 'sinergia');
+  if (e1.includes('totvs') && /(4tax|synchro|thomson|mastersaf|sovos)/i.test(c.name))
+    add(5, 'Integrações consolidadas no ecossistema TOTVS', 'sinergia');
+  if ((e1.includes('dynamics') || e1.includes('netsuite')) && /(avalara|sovos|thomson)/i.test(c.name))
+    add(4, 'Ecossistema cloud — API/integrações prontas', 'sinergia');
 
-  // Necessidades específicas
-  if (s.hasEcom && /avalara|nfe\.io/i.test(c.name)) push(6, 'e-commerce/NF-e', 'ecom');
-  if (s.multiMoeda && /sovos|thomson|guepardo/i.test(c.name)) push(6, 'multi-moeda/compliance', 'moeda');
-
-  const topReasons = pickTopReasons(reasons, 5);
+  const top = pickTopReasons(reasons, 5);
   const confidence = clamp(Math.round(score), 15, 95);
-
   return {
     name: c.name,
     confidence_pct: confidence,
-    why: reasonsToStrings(topReasons),
-    whyShort: composeWhyShort(topReasons),
+    why: top.map(r => r.text),
+    whyShort: composeWhyShort(top),
     criteria: uniq(criteria),
   };
 }
