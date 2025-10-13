@@ -1,4 +1,4 @@
-// scoring.js
+// scoring/scoring.js
 const ERPS = require('./erp_catalog');
 const FISCALS = require('./fiscal_catalog');
 
@@ -9,6 +9,26 @@ const toInt = (s) => {
   const n = parseInt(String(s).replace(/[^\d]/g, ''), 10);
   return Number.isFinite(n) ? n : 0;
 };
+
+// Converte número pt/US com milhar e decimal
+function toNumberBR(token) {
+  if (!token) return 0;
+  let t = String(token);
+  if (t.includes(',') && t.includes('.')) {
+    if (t.lastIndexOf(',') > t.lastIndexOf('.')) t = t.replace(/\./g, '').replace(',', '.');
+    else t = t.replace(/,/g, '');
+  } else if (t.includes(',')) {
+    t = t.replace(/\./g, '').replace(',', '.');
+  } else {
+    const idx = t.lastIndexOf('.');
+    if (idx >= 0) {
+      const dec = t.length - idx - 1;
+      if (dec > 3) t = t.replace(/\./g, '');
+    }
+  }
+  const n = parseFloat(t);
+  return Number.isFinite(n) ? Math.round(n) : 0;
+}
 
 // "1.001–5.000", "3.200+", "2.000 a 5.000", "1500-2000", "≈ 800", "1.2k"
 function parseEmployees(raw) {
@@ -36,27 +56,7 @@ function parseEmployees(raw) {
   return one ? toNumberBR(one[1]) : 0;
 }
 
-// Converte número pt/US com milhar e decimal
-function toNumberBR(token) {
-  if (!token) return 0;
-  let t = String(token);
-  if (t.includes(',') && t.includes('.')) {
-    if (t.lastIndexOf(',') > t.lastIndexOf('.')) t = t.replace(/\./g, '').replace(',', '.');
-    else t = t.replace(/,/g, '');
-  } else if (t.includes(',')) {
-    t = t.replace(/\./g, '').replace(',', '.');
-  } else {
-    const idx = t.lastIndexOf('.');
-    if (idx >= 0) {
-      const dec = t.length - idx - 1;
-      if (dec > 3) t = t.replace(/\./g, '');
-    }
-  }
-  const n = parseFloat(t);
-  return Number.isFinite(n) ? Math.round(n) : 0;
-}
-
-// "R$ 2,3 bilhões", "200 milhões", "US$ 50M" (só BRL/livre; não precisa perfeito pro porte)
+// "R$ 2,3 bilhões", "200 milhões", "US$ 50M" (loose; suficiente p/ banda)
 function parseMoneyLoose(raw) {
   if (!raw) return 0;
   const s = String(raw).toLowerCase();
@@ -92,9 +92,9 @@ function sentence(list, max = 3) {
 /* ----------------------------- SIGNALS ---------------------------------- */
 
 function deriveSignals(data) {
-  const text = JSON.stringify(data || {}).toLowerCase();
+  const fullText = JSON.stringify(data || {}).toLowerCase();
 
-  // ⚠️ NUNCA usamos "erpatualouprovavel" ou "solucaofiscalouprovavel" como evidência
+  // NÃO usar campos “oraculares” como evidência direta
   const scrubbed = { ...data };
   delete scrubbed.erpatualouprovavel;
   delete scrubbed.solucaofiscalouprovavel;
@@ -105,30 +105,123 @@ function deriveSignals(data) {
   const employeesReported = parseEmployees(data?.funcionarios);
   const revenueReported = parseMoneyLoose(data?.faturamento);
 
-  // Sinais reais (site, notícias, modelos)
+  // Sinais/keywords gerais
   const hasAzure = /azure|microsoft|power\s*bi|office\s*365|dynamics/.test(safeText);
   const hasSap = /\bsap\b|abap|s\/?4hana|sap\s+hana|sap\s+ecc|business\s+one/.test(safeText);
   const hasTotvs = /\btotvs\b|protheus|rm\b|datasul/.test(safeText);
   const hasOracle = /\boracle\b|netsuite/.test(safeText);
   const ecom = /e-?commerce|loja\s*virtual|marketplace|pedido online/.test(safeText);
+
+  // Segmentos
   const manuf = /manufatura|ind(ú|u)stria|f(á|a)brica|produção|planta/.test(seg);
   const serviços = /servi(ç|c)os|bpo|consultoria/.test(seg);
   const alimentos = /alimentos|food|bebidas|frigor(í|i)fico|agroneg(ó|o)cio/.test(seg);
   const varejo = /varejo|retail|atacado|distribui(ç|c)(ã|a)o|log(í|i)stica/.test(seg);
+  const financeiro = /(financial|financeiro|banco|segurador|seguros)/.test(seg);
+  const saude = /(sa(ú|u)de|healthcare|hospital)/.test(seg);
+  const energia = /(energia|utilities|el(é|e)trica)/.test(seg);
+
   const multiempresa = /holding|consolida(ç|c)(ã|a)o|multi-?empresa|multi-?entidade|controladas/.test(safeText);
   const cloudSaaS = /saas|cloud|nuvem|assinatura/.test(safeText);
+
+  // Heurística simples de multinacionalidade com o que já existe
+  const multinacional =
+    /global|latam|europe|europa|usa|estados unidos|luxembourg|méxico|argentina|chile|colombia|colômbia|portugal|espanha|spain|france|fran(ç|c)a|germany|alemanha/.test(safeText)
+    || /(subsidi(á|a)ria|filial)\s+(no|em)\s+[a-z]/.test(safeText);
+
+  const setor_regulado = !!(financeiro || saude || energia);
 
   return {
     seg,
     employeesReported,
     revenueReported,
     hasAzure, hasSap, hasTotvs, hasOracle,
-    ecom, manuf, serviços, alimentos, varejo,
-    multiempresa, cloudSaaS
+    ecom, manuf, serviços, alimentos, varejo, financeiro,
+    multiempresa, cloudSaaS,
+    multinacional,
+    setor_regulado,
+    fullText, // pode ser útil p/ keywords amplas
   };
 }
 
+/* ----------------------------- PAIN POINTS ------------------------------ */
+
+function erpPainPoints(candidate, s) {
+  const name = (candidate.name || '').toLowerCase();
+  const pains = [];
+
+  // genéricas por tier
+  if (candidate.tier === 'enterprise') {
+    uniqPush(pains, 'TCO/Capex mais elevados');
+    uniqPush(pains, 'Implantação e governança mais exigentes');
+    uniqPush(pains, 'Customizações fora do padrão podem aumentar complexidade');
+  }
+  if (candidate.tier === 'smb') {
+    uniqPush(pains, 'Limitações para cenários multiempresa/alto volume');
+    if (s.setor_regulado) uniqPush(pains, 'Aderência menor a requisitos regulatórios complexos');
+  }
+
+  // específicas por ecossistema
+  if (name.includes('oracle') && s.financeiro) {
+    uniqPush(pains, 'Ecossistema/localização BR geralmente menor que SAP em bancos');
+    uniqPush(pains, 'Menos aceleradores legados em core bancário no Brasil');
+  }
+  if (name.includes('dynamics')) {
+    uniqPush(pains, 'Menor presença setorial em bancário no BR');
+    uniqPush(pains, 'Talentos/conectores específicos podem ser menos abundantes');
+  }
+  if (name.includes('protheus') || name.includes('totvs')) {
+    if (s.financeiro) uniqPush(pains, 'Não é core tradicional para bancos/seguradoras');
+    if (s.multinacional) uniqPush(pains, 'Operação multinacional complexa pode exigir engenharia adicional');
+  }
+  if (name.includes('business one') || name.includes('business central') || name.includes('omie')) {
+    uniqPush(pains, 'Foco SMB — pode não escalar em enterprise');
+  }
+
+  return pains;
+}
+
+function fiscalPainPoints(candidate, s, erpTop1Name) {
+  const pains = [];
+  const nm = (candidate.name || '').toLowerCase();
+  const erp = (erpTop1Name || '').toLowerCase();
+
+  if (/mastersaf|thomson/.test(nm)) {
+    uniqPush(pains, 'Licenciamento e TCO mais altos');
+    uniqPush(pains, 'Implantação/governança podem ser complexas');
+  }
+  if (/sovos/.test(nm)) {
+    if (s.financeiro) uniqPush(pains, 'Pode carecer de aceleradores muito específicos de bancário vs. Mastersaf');
+  }
+  if (/synchro/.test(nm)) {
+    uniqPush(pains, 'Histórico mais forte em indústria/serviços do que em bancos');
+    if (s.multiempresa) uniqPush(pains, 'Escala multiempresa pode exigir maior engenharia');
+  }
+  if (/avalara/.test(nm)) {
+    uniqPush(pains, 'Mais comum em mid/SMB; pode não atender todos os cenários enterprise');
+  }
+
+  // desalinhamento com ERP top
+  if (erp && /netsuite|dynamics/.test(erp) && /mastersaf/.test(nm)) {
+    uniqPush(pains, 'Sinergia maior costuma ocorrer com SAP/Oracle');
+  }
+
+  return pains;
+}
+
 /* ----------------------------- SCORING ---------------------------------- */
+
+// Hard-filters de coerência básica por setor/porte
+function erpHardFilter(candidate, s) {
+  const name = (candidate.name || '').toLowerCase();
+
+  if (s.financeiro) {
+    if (/business one|business\s*central|omie|tiny/.test(name)) {
+      return { excluded: true, reason: 'SMB incompatível com setor financeiro/enterprise' };
+    }
+  }
+  return { excluded: false };
+}
 
 function sizeMatchScore(candidate, s, why) {
   let score = 0;
@@ -157,11 +250,16 @@ function sizeMatchScore(candidate, s, why) {
     if (emp > 0 && emp < 300 && candidate.tier === 'smb') score += 6;
   }
 
-  // Faturamento (só como “força extra” — evita ruído)
+  // Receita (força extra)
   const rev = s.revenueReported;
   if (rev > 0 && candidate.revHint) {
     const [rmin, rmax] = candidate.revHint; // ex.: [50e6, 2e9]
     if (rev >= rmin && rev <= rmax) score += 6;
+  }
+
+  // Multinacionalidade
+  if (s.multinacional && (candidate.tags?.includes('global') || candidate.tags?.includes('multiempresa'))) {
+    score += 6; uniqPush(why, 'footprint multinacional');
   }
 
   return score;
@@ -170,26 +268,32 @@ function sizeMatchScore(candidate, s, why) {
 function segmentMatchScore(candidate, s, why) {
   let score = 0;
 
-  if (s.multiempresa && candidate.tags.includes('multiempresa')) {
+  if (s.multiempresa && candidate.tags?.includes('multiempresa')) {
     score += 8; uniqPush(why, 'estrutura multiempresa/consolidação');
   }
-  if (s.cloudSaaS && (candidate.tags.includes('saas') || candidate.tags.includes('cloud'))) {
+  if (s.cloudSaaS && (candidate.tags?.includes('saas') || candidate.tags?.includes('cloud'))) {
     score += 6; uniqPush(why, 'preferência/aderência a cloud/SaaS');
   }
-  if (s.hasAzure && candidate.tags.includes('azure')) {
+  if (s.hasAzure && candidate.tags?.includes('azure')) {
     score += 7; uniqPush(why, 'stack Microsoft/Azure');
   }
-  if (s.manuf && candidate.tags.includes('manufatura')) {
+  if (s.manuf && candidate.tags?.includes('manufatura')) {
     score += 6; uniqPush(why, 'manufatura/produção');
   }
-  if (s.varejo && (candidate.tags.includes('distribuição') || candidate.tags.includes('varejo'))) {
+  if (s.varejo && (candidate.tags?.includes('distribuição') || candidate.tags?.includes('varejo'))) {
     score += 5; uniqPush(why, 'distribuição/varejo/logística');
   }
-  if (s.alimentos && candidate.tags.includes('manufatura')) {
+  if (s.alimentos && candidate.tags?.includes('manufatura')) {
     score += 4; uniqPush(why, 'alimentos/bebidas');
   }
-  if (s.serviços && candidate.tags.includes('serviços')) {
+  if (s.serviços && candidate.tags?.includes('serviços')) {
     score += 4; uniqPush(why, 'serviços/BPO');
+  }
+  if (s.financeiro && candidate.tags?.includes('financials')) {
+    score += 8; uniqPush(why, 'força em financials/setor regulado');
+  }
+  if (s.setor_regulado && candidate.tags?.includes('enterprise')) {
+    score += 5; uniqPush(why, 'aderência a compliance/regulação');
   }
 
   return score;
@@ -197,10 +301,17 @@ function segmentMatchScore(candidate, s, why) {
 
 function brandSignalScore(candidate, s, why) {
   let score = 0;
-  const name = candidate.name.toLowerCase();
-  if (s.hasSap && name.includes('sap')) { score += 10; uniqPush(why, 'sinais públicos de stack SAP'); }
-  if (s.hasTotvs && name.includes('totvs')) { score += 10; uniqPush(why, 'sinais públicos de stack TOTVS'); }
-  if (s.hasOracle && (name.includes('oracle') || name.includes('netsuite'))) { score += 8; uniqPush(why, 'sinais de Oracle/NetSuite'); }
+  const name = (candidate.name || '').toLowerCase();
+
+  if (s.hasSap && name.includes('sap')) {
+    score += 10; uniqPush(why, 'sinais públicos de stack SAP');
+  }
+  if (s.hasTotvs && (name.includes('totvs') || name.includes('protheus'))) {
+    score += 10; uniqPush(why, 'sinais públicos de stack TOTVS');
+  }
+  if (s.hasOracle && (name.includes('oracle') || name.includes('netsuite'))) {
+    score += 8; uniqPush(why, 'sinais de Oracle/NetSuite');
+  }
   return score;
 }
 
@@ -216,27 +327,50 @@ function keywordHitScore(candidate, text, why) {
 function scoreERP(candidate, s, rawText) {
   const why = [];
 
+  // hard filter
+  const hf = erpHardFilter(candidate, s);
+  if (hf.excluded) {
+    return {
+      name: candidate.name,
+      rawScore: -Infinity,
+      why: [`Excluído: ${hf.reason}`],
+      whyShort: 'excluído',
+      pain_points: []
+    };
+  }
+
   let score = 0;
   score += keywordHitScore(candidate, rawText, why);
   score += sizeMatchScore(candidate, s, why);
   score += segmentMatchScore(candidate, s, why);
   score += brandSignalScore(candidate, s, why);
 
-  // clamp bruto 0..100 (antes de normalizar globalmente)
-  score = Math.max(0, Math.min(100, score));
+  // Penalidades contextuais
+  const cname = (candidate.name || '').toLowerCase();
+  if (s.financeiro && (/protheus|senior/.test(cname))) {
+    score -= 12; uniqPush(why, 'não é core tradicional para bancos/seguros');
+  }
+  if ((/business one|business\s*central|omie/.test(cname)) && (s.employeesReported >= 300 || s.revenueReported >= 800_000_000)) {
+    score -= 25; uniqPush(why, 'mismatch de porte (SMB vs. enterprise)');
+  }
 
-  // whyShort: 1 linha amigável
+  // clamp bruto 0..100
+  if (score !== -Infinity) score = Math.max(0, Math.min(100, score));
+
+  // whyShort
   const bullets = [];
-  if (s.multiempresa && candidate.tags.includes('multiempresa')) bullets.push('multiempresa');
-  if (s.hasAzure && candidate.tags.includes('azure')) bullets.push('Azure');
-  if (s.manuf && candidate.tags.includes('manufatura')) bullets.push('manufatura');
-  if (s.varejo && (candidate.tags.includes('distribuição') || candidate.tags.includes('varejo'))) bullets.push('distribuição/varejo');
-  if (s.cloudSaaS && (candidate.tags.includes('saas') || candidate.tags.includes('cloud'))) bullets.push('cloud/SaaS');
+  if (s.multiempresa && candidate.tags?.includes('multiempresa')) bullets.push('multiempresa');
+  if (s.hasAzure && candidate.tags?.includes('azure')) bullets.push('Azure');
+  if (s.manuf && candidate.tags?.includes('manufatura')) bullets.push('manufatura');
+  if (s.varejo && (candidate.tags?.includes('distribuição') || candidate.tags?.includes('varejo'))) bullets.push('distribuição/varejo');
+  if (s.cloudSaaS && (candidate.tags?.includes('saas') || candidate.tags?.includes('cloud'))) bullets.push('cloud/SaaS');
   if (bullets.length === 0 && s.employeesReported) bullets.push(`porte ≈ ${s.employeesReported.toLocaleString('pt-BR')}`);
-
   const whyShort = sentence(bullets, 3);
 
-  return { name: candidate.name, rawScore: score, why: [...why], whyShort };
+  // pain points
+  const pain_points = erpPainPoints(candidate, s);
+
+  return { name: candidate.name, rawScore: score, why: [...why], whyShort, pain_points };
 }
 
 /* --------------------------- FISCAL RANKING ----------------------------- */
@@ -250,7 +384,7 @@ function scoreFiscal(candidate, s, erpTop1Name, rawText) {
   if (e.includes('sap') && /(thomson|mastersaf|guepardo|sovos|4tax)/i.test(candidate.name)) {
     score += 14; uniqPush(why, 'sinergia e conectores maduros com SAP');
   } else if ((e.includes('totvs') || e.includes('rm') || e.includes('protheus')) && /(4tax|synchro|thomson|mastersaf|sovos)/i.test(candidate.name)) {
-    score += 12; uniqPush(why, 'sinergia com TOTVS (ecosistema local)');
+    score += 12; uniqPush(why, 'sinergia com TOTVS (ecossistema local)');
   } else if ((e.includes('dynamics') || e.includes('netsuite')) && /(avalara|thomson|sovos)/i.test(candidate.name)) {
     score += 10; uniqPush(why, 'integrações fortes com ERPs cloud');
   } else if ((e.includes('omie') || e.includes('tiny') || e.includes('sankhya')) && /(nfe\.io|bpo|planilhas)/i.test(candidate.name)) {
@@ -265,8 +399,13 @@ function scoreFiscal(candidate, s, erpTop1Name, rawText) {
   if (emp >= 1500 && candidate.tier === 'enterprise') { score += 8; uniqPush(why, 'porte grande/complexo'); }
   if (emp > 0 && emp < 250 && candidate.tier === 'smb') { score += 6; uniqPush(why, 'adequado a SMB'); }
 
-  // e-commerce → fiscal que facilite NF-e/marketplace
+  // e-commerce → fiscal com NF-e/marketplace
   if (s.ecom && /avalara|nfe\.io/i.test(candidate.name)) { score += 6; uniqPush(why, 'bom suporte a NF-e/e-commerce'); }
+
+  // setor regulado tende a puxar enterprise
+  if (s.setor_regulado && candidate.tier === 'enterprise') {
+    score += 5; uniqPush(why, 'aderência a requisitos regulatórios');
+  }
 
   // clamp
   score = Math.max(0, Math.min(100, score));
@@ -278,28 +417,36 @@ function scoreFiscal(candidate, s, erpTop1Name, rawText) {
   if (emp > 0) bullets.push(`porte ≈ ${emp.toLocaleString('pt-BR')}`);
   const whyShort = sentence(bullets, 3);
 
-  return { name: candidate.name, rawScore: score, why: [...why], whyShort };
+  // pain points
+  const pain_points = fiscalPainPoints(candidate, s, erpTop1Name);
+
+  return { name: candidate.name, rawScore: score, why: [...why], whyShort, pain_points };
 }
 
 /* --------------------------- NORMALIZAÇÃO ------------------------------- */
 
-// Reescala scores para evitar empates e dar “cara de probabilidade”
+// Normalizador com leve “shape” de probabilidade visual
 function normalizeTop3(list) {
   if (!list.length) return [];
-  const scores = list.map(x => x.rawScore);
+  // filtra excluídos (rawScore -Infinity)
+  const valid = list.filter(x => Number.isFinite(x.rawScore));
+  if (!valid.length) return [];
+
+  const scores = valid.map(x => x.rawScore);
   const max = Math.max(...scores);
   const min = Math.min(...scores);
   const spread = Math.max(1, max - min);
 
-  // alvo: top ≈ 82–92%; segundo ≈ 55–78%; terceiro ≈ 38–65%
-  return list.map((x, idx) => {
+  // alvo: top ≈ 80–90%; segundo ≈ 55–78%; terceiro ≈ 38–65%
+  const ranked = valid.sort((a, b) => b.rawScore - a.rawScore).slice(0, 3);
+
+  return ranked.map((x, idx) => {
     const rel = (x.rawScore - min) / spread; // 0..1
-    // base linear 35..90
     let pct = Math.round(35 + rel * 55);
 
     // impulso pela posição final (desempate visual)
-    if (idx === 0) pct = Math.max(pct, 78 + Math.round(rel * 12)); // 78..90
-    if (idx === 1) pct = Math.min(Math.max(pct, 52), 85);
+    if (idx === 0) pct = Math.max(pct, 80 + Math.round(rel * 10)); // 80..90
+    if (idx === 1) pct = Math.min(Math.max(pct, 55), 85);
     if (idx === 2) pct = Math.min(Math.max(pct, 38), 72);
 
     return { ...x, confidence_pct: pct };
@@ -316,21 +463,23 @@ function buildTop3(relatorio) {
   const erpRankRaw = ERPS
     .map(c => scoreERP(c, s, rawText))
     .sort((a, b) => b.rawScore - a.rawScore);
-  const erp_top3 = normalizeTop3(erpRankRaw.slice(0, 3));
+  const erp_top3 = normalizeTop3(erpRankRaw);
 
   // Fiscal (depende do ERP #1)
+  const erpTop1Name = erp_top3[0]?.name || '';
   const fiscalRankRaw = FISCALS
-    .map(c => scoreFiscal(c, s, erp_top3[0]?.name || '', rawText))
+    .map(c => scoreFiscal(c, s, erpTop1Name, rawText))
     .sort((a, b) => b.rawScore - a.rawScore);
-  const fiscal_top3 = normalizeTop3(fiscalRankRaw.slice(0, 3));
+  const fiscal_top3 = normalizeTop3(fiscalRankRaw);
 
-  // Limpa campos internos
+  // Limpa campos internos e entrega “por que” + “pontos de dor”
   const clean = (arr) =>
     arr.map(x => ({
       name: x.name,
       confidence_pct: x.confidence_pct,
       whyShort: x.whyShort,
-      why: x.why // lista (sem duplicatas), legível
+      why: x.why,               // razões (provas)
+      pain_points: x.pain_points // pontos de dor (por que não ficou acima)
     }));
 
   return { erp_top3: clean(erp_top3), fiscal_top3: clean(fiscal_top3) };
