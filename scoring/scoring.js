@@ -2,278 +2,338 @@
 const ERPS = require('./erp_catalog');
 const FISCALS = require('./fiscal_catalog');
 
-/* =============== Utils =============== */
-const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
-const uniq = (arr) => Array.from(new Set(arr.filter(Boolean)));
+/* -------------------------- PARSERS & HELPERS -------------------------- */
 
 const toInt = (s) => {
-  const n = parseInt(String(s || '').replace(/[^\d]/g, ''), 10);
+  if (s == null) return 0;
+  const n = parseInt(String(s).replace(/[^\d]/g, ''), 10);
   return Number.isFinite(n) ? n : 0;
 };
 
-const parseEmployees = (raw) => {
+// "1.001–5.000", "3.200+", "2.000 a 5.000", "1500-2000", "≈ 800", "1.2k"
+function parseEmployees(raw) {
   if (!raw) return 0;
-  const s = String(raw).toLowerCase();
-  const mRange = s.replace(/\s/g,'').match(/(\d[\d\.,]*)\D+(\d[\d\.,]*)/);
-  if (mRange) {
-    const a = toInt(mRange[1]); const b = toInt(mRange[2]);
-    return Math.round((a + b) / 2);
-  }
-  const mOne = s.match(/(\d[\d\.,]*)/);
-  return mOne ? toInt(mOne[1]) : 0;
-};
+  const s = String(raw).toLowerCase().replace(/\s+/g, ' ').trim();
 
-const parseMoneyBR = (raw) => {
-  if (!raw) return 0;
-  let s = String(raw).toLowerCase();
-  const mult = /\bbil(h|i)?(ão|oes|ões)?\b|\bbi\b|\bb\b/.test(s) ? 1e9
-             : /\bmilh(ão|oes|ões)\b|\bmi\b|\bmm\b|\bmio\b|\bm\b/.test(s) ? 1e6
-             : /\bmil\b/.test(s) ? 1e3 : 1;
-  const m = s.match(/(\d{1,3}(?:[.\,]\d{3})+(?:[.,]\d+)?|\d+[.,]\d+|\d+)/);
-  if (!m) return 0;
-  let t = m[1];
+  // k/mi abreviação
+  const kMatch = s.match(/(\d+(?:[.,]\d+)?)\s*k\b/);
+  if (kMatch) return Math.round(parseFloat(kMatch[1].replace(',', '.')) * 1000);
+
+  // intervalo com separadores
+  const range = s.match(/(\d[\d.,]*)\s*(?:–|-|a|até)\s*(\d[\d.,]*)/i);
+  if (range) {
+    const a = toNumberBR(range[1]);
+    const b = toNumberBR(range[2]);
+    if (a && b) return Math.round((a + b) / 2);
+  }
+
+  // número com "+" (ex.: 3200+)
+  const plus = s.match(/(\d[\d.,]*)\s*\+/);
+  if (plus) return toNumberBR(plus[1]);
+
+  // único número
+  const one = s.match(/(\d{1,3}(?:[.\,]\d{3})+(?:[.,]\d+)?|\d+[.,]\d+|\d+)/);
+  return one ? toNumberBR(one[1]) : 0;
+}
+
+// Converte número pt/US com milhar e decimal
+function toNumberBR(token) {
+  if (!token) return 0;
+  let t = String(token);
   if (t.includes(',') && t.includes('.')) {
-    if (t.lastIndexOf(',') > t.lastIndexOf('.')) t = t.replace(/\./g,'').replace(',', '.');
-    else t = t.replace(/,/g,'');
+    if (t.lastIndexOf(',') > t.lastIndexOf('.')) t = t.replace(/\./g, '').replace(',', '.');
+    else t = t.replace(/,/g, '');
   } else if (t.includes(',')) {
-    t = t.replace(/\./g,'').replace(',', '.');
+    t = t.replace(/\./g, '').replace(',', '.');
   } else {
     const idx = t.lastIndexOf('.');
     if (idx >= 0) {
       const dec = t.length - idx - 1;
-      if (dec > 3) t = t.replace(/\./g,''); // milhar
+      if (dec > 3) t = t.replace(/\./g, '');
     }
   }
-  const base = parseFloat(t);
-  return Number.isFinite(base) ? base * mult : 0;
-};
+  const n = parseFloat(t);
+  return Number.isFinite(n) ? Math.round(n) : 0;
+}
 
-/* =============== Coleta de textos (exclui campos viciados) =============== */
-function collectEvidenceSources(rel) {
-  const out = [];
-  const push = (key, val) => { if (val) out.push({ key, text: String(val) }); };
+// "R$ 2,3 bilhões", "200 milhões", "US$ 50M" (só BRL/livre; não precisa perfeito pro porte)
+function parseMoneyLoose(raw) {
+  if (!raw) return 0;
+  const s = String(raw).toLowerCase();
 
-  // usamos: empresa, setor, dor, compelling, gatilho, site, funcionários, faturamento
-  push('nomedaempresa', rel?.nomedaempresa);
-  push('segmento', rel?.segmento);
-  push('subsegmento', rel?.subsegmento);
-  push('principaldordonegocio', rel?.principaldordonegocio);
-  push('Compelling', rel?.Compelling);
-  push('gatilhocomercial', rel?.gatilhocomercial);
-  push('site', rel?.site);
-  push('funcionarios', rel?.funcionarios);
-  push('faturamento', rel?.faturamento);
+  // multiplicador textual
+  const mult =
+    /\bbil(h|i)?(ão|oes|ões)?\b|\bbi\b|\bb\b/.test(s) ? 1e9 :
+    /\bmilh(ão|oes|ões)\b|\bmi\b|\bmm\b|\bmio\b|\bm\b/.test(s) ? 1e6 :
+    /\bmil\b/.test(s) ? 1e3 : 1;
 
-  // notícias (título + resumo + data)
-  (rel?.ultimas5noticias || []).forEach((n, i) => {
-    const data = n?.data || n?.date || '';
-    if (typeof n === 'string') {
-      out.push({ key: `noticia[${i}] ${data}`, text: n });
+  // número
+  const m = s.match(/(\d{1,3}(?:[.\,]\d{3})+(?:[.,]\d+)?|\d+[.,]\d+|\d+)/);
+  if (!m) return 0;
+  const base = toNumberBR(m[1]);
+  return base * mult;
+}
+
+function uniqPush(arr, txt) {
+  if (!txt) return;
+  const t = String(txt).trim();
+  if (!t) return;
+  if (!arr.some(x => x.toLowerCase() === t.toLowerCase())) arr.push(t);
+}
+
+function sentence(list, max = 3) {
+  const a = list.slice(0, max);
+  if (a.length === 0) return '';
+  if (a.length === 1) return a[0];
+  if (a.length === 2) return `${a[0]} e ${a[1]}`;
+  return `${a[0]}, ${a[1]} e ${a[2]}`;
+}
+
+/* ----------------------------- SIGNALS ---------------------------------- */
+
+function deriveSignals(data) {
+  const text = JSON.stringify(data || {}).toLowerCase();
+
+  // ⚠️ NUNCA usamos "erpatualouprovavel" ou "solucaofiscalouprovavel" como evidência
+  const scrubbed = { ...data };
+  delete scrubbed.erpatualouprovavel;
+  delete scrubbed.solucaofiscalouprovavel;
+  const safeText = JSON.stringify(scrubbed || {}).toLowerCase();
+
+  const seg = [data?.segmento || '', data?.subsegmento || ''].join(' ').toLowerCase();
+
+  const employeesReported = parseEmployees(data?.funcionarios);
+  const revenueReported = parseMoneyLoose(data?.faturamento);
+
+  // Sinais reais (site, notícias, modelos)
+  const hasAzure = /azure|microsoft|power\s*bi|office\s*365|dynamics/.test(safeText);
+  const hasSap = /\bsap\b|abap|s\/?4hana|sap\s+hana|sap\s+ecc|business\s+one/.test(safeText);
+  const hasTotvs = /\btotvs\b|protheus|rm\b|datasul/.test(safeText);
+  const hasOracle = /\boracle\b|netsuite/.test(safeText);
+  const ecom = /e-?commerce|loja\s*virtual|marketplace|pedido online/.test(safeText);
+  const manuf = /manufatura|ind(ú|u)stria|f(á|a)brica|produção|planta/.test(seg);
+  const serviços = /servi(ç|c)os|bpo|consultoria/.test(seg);
+  const alimentos = /alimentos|food|bebidas|frigor(í|i)fico|agroneg(ó|o)cio/.test(seg);
+  const varejo = /varejo|retail|atacado|distribui(ç|c)(ã|a)o|log(í|i)stica/.test(seg);
+  const multiempresa = /holding|consolida(ç|c)(ã|a)o|multi-?empresa|multi-?entidade|controladas/.test(safeText);
+  const cloudSaaS = /saas|cloud|nuvem|assinatura/.test(safeText);
+
+  return {
+    seg,
+    employeesReported,
+    revenueReported,
+    hasAzure, hasSap, hasTotvs, hasOracle,
+    ecom, manuf, serviços, alimentos, varejo,
+    multiempresa, cloudSaaS
+  };
+}
+
+/* ----------------------------- SCORING ---------------------------------- */
+
+function sizeMatchScore(candidate, s, why) {
+  let score = 0;
+
+  // Funcionários
+  const emp = s.employeesReported;
+  if (emp > 0) {
+    const min = candidate.sizeHint?.minEmp ?? 0;
+    const max = candidate.sizeHint?.maxEmp ?? Infinity;
+
+    if (emp >= min && emp <= max) {
+      score += 18;
+      uniqPush(why, `porte compatível (${emp.toLocaleString('pt-BR')} colaboradores)`);
     } else {
-      if (n?.titulo || n?.title) out.push({ key: `noticia[${i}] ${data}`, text: n.titulo || n.title });
-      if (n?.resumo || n?.summary) out.push({ key: `noticia[${i}] ${data}`, text: n.resumo || n.summary });
+      // penalidade suave se muito fora
+      const dist =
+        emp < min ? (min - emp) / (min || 1) :
+        emp > max ? (emp - max) / (max || 1) : 0;
+      const penal = Math.max(0, 10 - Math.min(10, Math.round(dist * 10))); // 0..10
+      score += penal; // 0..10
+      if (penal > 0) uniqPush(why, `porte parcialmente compatível (≈${emp.toLocaleString('pt-BR')})`);
     }
-  });
 
-  // NÃO usamos: erpatualouprovavel, justificativaERP, solucaofiscalouprovavel, criteriofiscal
-  return out;
-}
-
-function findMatches(rel, keywordList) {
-  const hay = collectEvidenceSources(rel);
-  const res = [];
-  const needles = (keywordList || []).map(k => String(k).toLowerCase());
-  hay.forEach(({ key, text }) => {
-    const low = text.toLowerCase();
-    needles.forEach(n => {
-      const idx = low.indexOf(n);
-      if (idx >= 0) {
-        const start = Math.max(0, idx - 30);
-        const end = Math.min(text.length, idx + n.length + 30);
-        const snippet = text.substring(start, end).replace(/\s+/g, ' ').trim();
-        res.push({ key, needle: n, snippet });
-      }
-    });
-  });
-  return res;
-}
-
-/* =============== Sinais derivados (sem “hint” de ERP/Fiscal) =============== */
-function deriveSignals(rel) {
-  const text = JSON.stringify(rel || {}).toLowerCase();
-  const seg = ([(rel?.segmento||''), (rel?.subsegmento||'')].join(' ')).toLowerCase();
-  const employees = parseEmployees(rel?.funcionarios);
-  const revenue = parseMoneyBR(rel?.faturamento);
-  const has = (re) => re.test(text) || re.test(seg);
-
-  // Stacks / integrações
-  const hasAzure   = has(/azure|microsoft|power\s*bi|office\s*365|dynamics/);
-  const hasAws     = has(/\baws\b|amazon web services/);
-  const hasGcp     = has(/google cloud|gcp|bigquery|looker/);
-  const hasSalesforce = has(/salesforce|crm cloud/);
-
-  // Segmentos/necessidades
-  const manuf        = has(/manufatura|ind(ú|u)stria|f(á|a)brica|produção/);
-  const serviços     = has(/servi(ç|c)os|bpo|consultoria/);
-  const alimentos    = has(/alimentos|food|bebidas|frigor(í|i)fico/);
-  const varejo       = has(/varejo|retail|atacado|distribui(ç|c)(ã|a)o/);
-  const hasEcom      = has(/e-?commerce|loja\s*virtual|marketplace|magento|vtex|shopify|woocommerce/);
-  const hasWmsTms    = has(/\bwms\b|\btms\b|log(í|i)stica|armaz(é|e)m/);
-
-  const multiempresa = has(/holding|consolida(ç|c)(ã|a)o|multi-?empresa|multi-?entidade/);
-  const multiMoeda   = has(/multi-?moeda|moedas|c(â|a)mbio|fx|usd|eur/);
-  const multiPais    = has(/opera(ç|c)(õ|o)es? internacionais|filiais? no exterior|global|latam|em \b\d+\b pa(í|i)ses/);
-
-  const cloudSaaS    = has(/saas|cloud|nuvem/);
-  const onPrem       = has(/on-?prem|data\s*center\s*pr(ó|o)prio|servidores?\s*locais?/);
-  const legacy       = has(/legado|sistema\s*pr(ó|o)prio|desenvolvimento\s*pr(ó|o)prio|casa/);
-
-  return {
-    text, seg, employees, revenue,
-    hasAzure, hasAws, hasGcp, hasSalesforce,
-    manuf, serviços, alimentos, varejo, hasEcom, hasWmsTms,
-    multiempresa, multiMoeda, multiPais,
-    cloudSaaS, onPrem, legacy
-  };
-}
-
-/* =============== Helpers de razões (explicativas) =============== */
-function pickTopReasons(reasons, max = 5) {
-  const seen = new Set();
-  const out = [];
-  for (const r of reasons) {
-    const key = r.text; // dedup por texto final para evitar repetição
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(r);
-    }
-    if (out.length >= max) break;
+    // tier bônus
+    if (emp >= 1500 && candidate.tier === 'enterprise') score += 6;
+    if (emp > 0 && emp < 300 && candidate.tier === 'smb') score += 6;
   }
-  return out;
+
+  // Faturamento (só como “força extra” — evita ruído)
+  const rev = s.revenueReported;
+  if (rev > 0 && candidate.revHint) {
+    const [rmin, rmax] = candidate.revHint; // ex.: [50e6, 2e9]
+    if (rev >= rmin && rev <= rmax) score += 6;
+  }
+
+  return score;
 }
 
-function composeWhyShort(reasons) {
-  if (!reasons.length) return '';
-  const tops = reasons.slice(0, 2).map(r => r.text);
-  return tops.join(' • ');
-}
-
-/* =============== Score ERP (sem “hint”) =============== */
-function scoreERP(c, s, rel) {
+function segmentMatchScore(candidate, s, why) {
   let score = 0;
-  const reasons = [];
-  const criteria = [];
-  const add = (pts, text, crit) => { if (pts>0){ score+=pts; reasons.push({text}); criteria.push(crit);} };
 
-  // 1) Evidência textual pública (notícias/descrições)
-  const kwMatches = findMatches(rel, c.keywords || []);
-  if (kwMatches.length) {
-    const ex = kwMatches[0];
-    add(42, `Mencionado em ${ex.key}: “${ex.snippet}”`, 'evidência pública');
+  if (s.multiempresa && candidate.tags.includes('multiempresa')) {
+    score += 8; uniqPush(why, 'estrutura multiempresa/consolidação');
+  }
+  if (s.cloudSaaS && (candidate.tags.includes('saas') || candidate.tags.includes('cloud'))) {
+    score += 6; uniqPush(why, 'preferência/aderência a cloud/SaaS');
+  }
+  if (s.hasAzure && candidate.tags.includes('azure')) {
+    score += 7; uniqPush(why, 'stack Microsoft/Azure');
+  }
+  if (s.manuf && candidate.tags.includes('manufatura')) {
+    score += 6; uniqPush(why, 'manufatura/produção');
+  }
+  if (s.varejo && (candidate.tags.includes('distribuição') || candidate.tags.includes('varejo'))) {
+    score += 5; uniqPush(why, 'distribuição/varejo/logística');
+  }
+  if (s.alimentos && candidate.tags.includes('manufatura')) {
+    score += 4; uniqPush(why, 'alimentos/bebidas');
+  }
+  if (s.serviços && candidate.tags.includes('serviços')) {
+    score += 4; uniqPush(why, 'serviços/BPO');
   }
 
-  // 2) Porte por funcionários
-  const e = s.employees;
-  const inRange =
-    (c.sizeHint?.minEmp ? e >= c.sizeHint.minEmp : true) &&
-    (c.sizeHint?.maxEmp ? e <= c.sizeHint.maxEmp : true);
-  if (e > 0 && inRange) add(16, `Porte compatível (~${e.toLocaleString('pt-BR')} funcionários)`, 'porte');
-  if (e > 1500 && c.tier === 'enterprise') add(6, 'Tier enterprise combina com porte', 'porte');
-  if (e > 0 && e < 300 && c.tier === 'smb') add(6, 'Foco SMB combina com porte', 'porte');
-
-  // 3) Necessidades claras (explicadas)
-  if (s.multiempresa && c.tags.includes('multiempresa')) add(8, 'Estrutura de holding/múltiplas entidades citada — requer consolidação robusta', 'multiempresa');
-  if (s.multiMoeda   && c.tags.includes('multi-moeda')) add(6, 'Operações em múltiplas moedas mencionadas — exige suporte nativo a FX', 'multi-moeda');
-  if (s.multiPais    && c.tags.includes('multi-país'))  add(6, 'Atuação em mais de um país — importante fiscalidade/legislação multi-país', 'multi-país');
-
-  if (s.cloudSaaS && (c.tags.includes('saas') || c.tags.includes('cloud'))) add(6, 'Preferência por SaaS/Cloud aparece no material', 'cloud');
-  if (s.onPrem    && c.tags.includes('on-prem')) add(4, 'Cenário on-premises citado — plataforma compatível', 'on-prem');
-  if (s.legacy    && c.tags.includes('migração')) add(4, 'Legado/migração mencionados — produto com trilha de migração', 'migração');
-
-  if (s.hasAzure   && c.tags.includes('azure'))     add(6, 'Stack Microsoft/Azure presente — sinergia técnica', 'stack');
-  if (s.hasAws     && c.tags.includes('aws'))       add(4, 'Uso/menção de AWS — integração favorável', 'stack');
-  if (s.hasGcp     && c.tags.includes('gcp'))       add(3, 'Uso/menção de Google Cloud — integração possível', 'stack');
-  if (s.hasSalesforce && c.tags.includes('crm'))    add(3, 'CRM (Salesforce/afins) citado — conectores maduros', 'crm');
-  if (s.hasWmsTms  && c.tags.includes('logística')) add(3, 'Indícios de WMS/TMS/logística — ERP forte em cadeia logística', 'logística');
-
-  if (s.manuf      && c.tags.includes('manufatura'))      add(5, 'Atuação industrial — módulos de manufatura aderentes', 'segmento');
-  if (s.varejo     && (c.tags.includes('distribuição') || c.tags.includes('varejo'))) add(4, 'Varejo/distribuição — processos de vendas e estoque', 'segmento');
-  if (s.alimentos  && c.tags.includes('manufatura'))      add(3, 'Alimentos/bebidas — requisitos de lote/qualidade', 'segmento');
-  if (s.serviços   && c.tags.includes('serviços'))        add(3, 'Serviços/BPO — projetos, faturamento e centros de custo', 'segmento');
-  if (s.hasEcom    && c.tags.includes('e-commerce'))      add(4, 'E-commerce/marketplace — integrações nativas', 'e-commerce');
-
-  // 4) Limita razões e calcula score
-  const top = pickTopReasons(reasons, 5);
-  const confidence = clamp(Math.round(score), 15, 95);
-  return {
-    name: c.name,
-    confidence_pct: confidence,
-    why: top.map(r => r.text),
-    whyShort: composeWhyShort(top),
-    criteria: uniq(criteria),
-  };
+  return score;
 }
 
-/* =============== Score Fiscal (sem “hint”) =============== */
-function scoreFiscal(c, s, rel, erpTop1Name='') {
+function brandSignalScore(candidate, s, why) {
   let score = 0;
-  const reasons = [];
-  const criteria = [];
-  const add = (pts, text, crit) => { if (pts>0){ score+=pts; reasons.push({text}); criteria.push(crit);} };
-
-  // 1) Evidência pública
-  const kwMatches = findMatches(rel, c.keywords || []);
-  if (kwMatches.length) {
-    const ex = kwMatches[0];
-    add(30, `Mencionado em ${ex.key}: “${ex.snippet}”`, 'evidência pública');
-  }
-
-  // 2) Porte e complexidade fiscal
-  const e = s.employees;
-  if (e > 1500 && c.tier === 'enterprise') add(10, 'Porte grande — obrigações acessórias complexas', 'porte');
-  if (e > 0 && e < 200 && c.tier === 'smb') add(8, 'Porte SMB — solução enxuta compensa', 'porte');
-
-  // 3) Necessidades fiscais claras
-  if (s.multiPais && /sovos|thomson|guepardo|4tax/i.test(c.name)) add(8, 'Atuação em vários países — compliance multinacional', 'multi-país');
-  if (s.multiMoeda && /sovos|thomson|guepardo/i.test(c.name)) add(6, 'Multi-moeda/FX — apuração e integrações fiscais', 'multi-moeda');
-  if (s.hasEcom && /avalara|nfe\.io/i.test(c.name)) add(7, 'E-commerce/NF-e — gateways fiscais prontos', 'e-commerce');
-  if (s.manuf && /guepardo|thomson|4tax/i.test(c.name)) add(5, 'Indústria — SPED/Blocos e créditos de ICMS/PIS/COFINS', 'manufatura');
-
-  // 4) Sinergia com stack de TI (não usa “hint” antigo)
-  const e1 = (erpTop1Name || '').toLowerCase();
-  if (e1.includes('sap') && /(thomson|mastersaf|guepardo|sovos|4tax)/i.test(c.name))
-    add(6, 'ERP com perfil enterprise — conectores maduros', 'sinergia');
-  if (e1.includes('totvs') && /(4tax|synchro|thomson|mastersaf|sovos)/i.test(c.name))
-    add(5, 'Integrações consolidadas no ecossistema TOTVS', 'sinergia');
-  if ((e1.includes('dynamics') || e1.includes('netsuite')) && /(avalara|sovos|thomson)/i.test(c.name))
-    add(4, 'Ecossistema cloud — API/integrações prontas', 'sinergia');
-
-  const top = pickTopReasons(reasons, 5);
-  const confidence = clamp(Math.round(score), 15, 95);
-  return {
-    name: c.name,
-    confidence_pct: confidence,
-    why: top.map(r => r.text),
-    whyShort: composeWhyShort(top),
-    criteria: uniq(criteria),
-  };
+  const name = candidate.name.toLowerCase();
+  if (s.hasSap && name.includes('sap')) { score += 10; uniqPush(why, 'sinais públicos de stack SAP'); }
+  if (s.hasTotvs && name.includes('totvs')) { score += 10; uniqPush(why, 'sinais públicos de stack TOTVS'); }
+  if (s.hasOracle && (name.includes('oracle') || name.includes('netsuite'))) { score += 8; uniqPush(why, 'sinais de Oracle/NetSuite'); }
+  return score;
 }
 
-/* =============== API pública =============== */
+function keywordHitScore(candidate, text, why) {
+  if (!candidate.keywords?.length) return 0;
+  const hit = candidate.keywords.some(k => text.includes(String(k).toLowerCase()));
+  if (hit) { uniqPush(why, 'palavras-chave do fornecedor foram encontradas'); return 20; }
+  return 0;
+}
+
+/* --------------------------- ERP RANKING -------------------------------- */
+
+function scoreERP(candidate, s, rawText) {
+  const why = [];
+
+  let score = 0;
+  score += keywordHitScore(candidate, rawText, why);
+  score += sizeMatchScore(candidate, s, why);
+  score += segmentMatchScore(candidate, s, why);
+  score += brandSignalScore(candidate, s, why);
+
+  // clamp bruto 0..100 (antes de normalizar globalmente)
+  score = Math.max(0, Math.min(100, score));
+
+  // whyShort: 1 linha amigável
+  const bullets = [];
+  if (s.multiempresa && candidate.tags.includes('multiempresa')) bullets.push('multiempresa');
+  if (s.hasAzure && candidate.tags.includes('azure')) bullets.push('Azure');
+  if (s.manuf && candidate.tags.includes('manufatura')) bullets.push('manufatura');
+  if (s.varejo && (candidate.tags.includes('distribuição') || candidate.tags.includes('varejo'))) bullets.push('distribuição/varejo');
+  if (s.cloudSaaS && (candidate.tags.includes('saas') || candidate.tags.includes('cloud'))) bullets.push('cloud/SaaS');
+  if (bullets.length === 0 && s.employeesReported) bullets.push(`porte ≈ ${s.employeesReported.toLocaleString('pt-BR')}`);
+
+  const whyShort = sentence(bullets, 3);
+
+  return { name: candidate.name, rawScore: score, why: [...why], whyShort };
+}
+
+/* --------------------------- FISCAL RANKING ----------------------------- */
+
+function scoreFiscal(candidate, s, erpTop1Name, rawText) {
+  const why = [];
+  let score = 0;
+
+  // synergy com ERP #1
+  const e = (erpTop1Name || '').toLowerCase();
+  if (e.includes('sap') && /(thomson|mastersaf|guepardo|sovos|4tax)/i.test(candidate.name)) {
+    score += 14; uniqPush(why, 'sinergia e conectores maduros com SAP');
+  } else if ((e.includes('totvs') || e.includes('rm') || e.includes('protheus')) && /(4tax|synchro|thomson|mastersaf|sovos)/i.test(candidate.name)) {
+    score += 12; uniqPush(why, 'sinergia com TOTVS (ecosistema local)');
+  } else if ((e.includes('dynamics') || e.includes('netsuite')) && /(avalara|thomson|sovos)/i.test(candidate.name)) {
+    score += 10; uniqPush(why, 'integrações fortes com ERPs cloud');
+  } else if ((e.includes('omie') || e.includes('tiny') || e.includes('sankhya')) && /(nfe\.io|bpo|planilhas)/i.test(candidate.name)) {
+    score += 10; uniqPush(why, 'boa relação custo/benefício para SMB');
+  }
+
+  // keywords da solução
+  score += keywordHitScore(candidate, rawText, why);
+
+  // porte
+  const emp = s.employeesReported;
+  if (emp >= 1500 && candidate.tier === 'enterprise') { score += 8; uniqPush(why, 'porte grande/complexo'); }
+  if (emp > 0 && emp < 250 && candidate.tier === 'smb') { score += 6; uniqPush(why, 'adequado a SMB'); }
+
+  // e-commerce → fiscal que facilite NF-e/marketplace
+  if (s.ecom && /avalara|nfe\.io/i.test(candidate.name)) { score += 6; uniqPush(why, 'bom suporte a NF-e/e-commerce'); }
+
+  // clamp
+  score = Math.max(0, Math.min(100, score));
+
+  // whyShort
+  const bullets = [];
+  if (e) bullets.push(`alinha com ${erpTop1Name.split(' ')[0]}`);
+  if (s.ecom && /avalara|nfe\.io/i.test(candidate.name)) bullets.push('NF-e/e-commerce');
+  if (emp > 0) bullets.push(`porte ≈ ${emp.toLocaleString('pt-BR')}`);
+  const whyShort = sentence(bullets, 3);
+
+  return { name: candidate.name, rawScore: score, why: [...why], whyShort };
+}
+
+/* --------------------------- NORMALIZAÇÃO ------------------------------- */
+
+// Reescala scores para evitar empates e dar “cara de probabilidade”
+function normalizeTop3(list) {
+  if (!list.length) return [];
+  const scores = list.map(x => x.rawScore);
+  const max = Math.max(...scores);
+  const min = Math.min(...scores);
+  const spread = Math.max(1, max - min);
+
+  // alvo: top ≈ 82–92%; segundo ≈ 55–78%; terceiro ≈ 38–65%
+  return list.map((x, idx) => {
+    const rel = (x.rawScore - min) / spread; // 0..1
+    // base linear 35..90
+    let pct = Math.round(35 + rel * 55);
+
+    // impulso pela posição final (desempate visual)
+    if (idx === 0) pct = Math.max(pct, 78 + Math.round(rel * 12)); // 78..90
+    if (idx === 1) pct = Math.min(Math.max(pct, 52), 85);
+    if (idx === 2) pct = Math.min(Math.max(pct, 38), 72);
+
+    return { ...x, confidence_pct: pct };
+  });
+}
+
+/* ---------------------------- API PUBLICA ------------------------------- */
+
 function buildTop3(relatorio) {
   const s = deriveSignals(relatorio);
+  const rawText = JSON.stringify(relatorio || {}).toLowerCase();
 
-  const erpRank = ERPS
-    .map(c => scoreERP(c, s, relatorio))
-    .sort((a,b) => b.confidence_pct - a.confidence_pct);
-  const erp_top3 = erpRank.slice(0, 3);
+  // ERP
+  const erpRankRaw = ERPS
+    .map(c => scoreERP(c, s, rawText))
+    .sort((a, b) => b.rawScore - a.rawScore);
+  const erp_top3 = normalizeTop3(erpRankRaw.slice(0, 3));
 
-  const fiscalRank = FISCALS
-    .map(c => scoreFiscal(c, s, relatorio, erp_top3[0]?.name || ''))
-    .sort((a,b) => b.confidence_pct - a.confidence_pct);
-  const fiscal_top3 = fiscalRank.slice(0, 3);
+  // Fiscal (depende do ERP #1)
+  const fiscalRankRaw = FISCALS
+    .map(c => scoreFiscal(c, s, erp_top3[0]?.name || '', rawText))
+    .sort((a, b) => b.rawScore - a.rawScore);
+  const fiscal_top3 = normalizeTop3(fiscalRankRaw.slice(0, 3));
 
-  return { erp_top3, fiscal_top3 };
+  // Limpa campos internos
+  const clean = (arr) =>
+    arr.map(x => ({
+      name: x.name,
+      confidence_pct: x.confidence_pct,
+      whyShort: x.whyShort,
+      why: x.why // lista (sem duplicatas), legível
+    }));
+
+  return { erp_top3: clean(erp_top3), fiscal_top3: clean(fiscal_top3) };
 }
 
 module.exports = { buildTop3 };
