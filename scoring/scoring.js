@@ -457,108 +457,95 @@ function normalizeTop3(list) {
 
 /* --------------------------- COMPARADORES -------------------------------- */
 
-// seleciona uma razão curta, contextualmente variada, para explicar por que o item ficou abaixo
-function simpleReason(upper, lower, s, type /* 'ERP' | 'FISCAL' */) {
-  if (!upper || !lower) return '';
+// gera até 2 razões curtas baseadas nos DELTAS de breakdown e nos sinais do cenário
+function reasonsFromBreakdown(upper, lower, s, type) {
+  const u = upper.breakdown || {}, l = lower.breakdown || {};
+  const diffs = [];
 
+  // vantagens do líder (quanto MAIOR no upper, melhor p/ ele)
+  diffs.push({key:'evidence',       diff:(u.evidence||0)-(l.evidence||0), map:()=>'há evidências/menções públicas mais fortes no líder'});
+  diffs.push({key:'size_fit',       diff:(u.size_fit||0)-(l.size_fit||0), map:()=>'o porte/escala se encaixa melhor no líder'});
+  diffs.push({key:'segment_fit',    diff:(u.segment_fit||0)-(l.segment_fit||0), map:()=>'maior aderência ao segmento/regulação no líder'});
+  diffs.push({key:'brand_signals',  diff:(u.brand_signals||0)-(l.brand_signals||0), map:()=>'há mais sinais de ecossistema favoráveis ao líder'});
+  if (type === 'FISCAL') {
+    diffs.push({key:'synergy',      diff:(u.synergy||0)-(l.synergy||0), map:()=>'melhor sinergia/integração com o ERP líder'});
+  }
+  // penalidades (quanto MAIOR no lower, pior p/ ele → favorece o líder)
+  diffs.push({key:'cost_penalties',     diff:(l.cost_penalties||0)-(u.cost_penalties||0), map:()=>'TCO/complexidade mais elevados na alternativa'});
+  diffs.push({key:'mismatch_penalties', diff:(l.mismatch_penalties||0)-(u.mismatch_penalties||0), map:()=>'mais incompatibilidades de porte/complexidade na alternativa'});
+  diffs.push({key:'family_rules',       diff:(l.family_rules||0)-(u.family_rules||0), map:()=>'regras de família/versão pesam contra a alternativa'});
+
+  // especializações por nome/contexto para enriquecer texto
   const uName = (upper.name||'').toLowerCase();
   const lName = (lower.name||'').toLowerCase();
+  const customText = [];
 
-  // 1) Evidência pública
-  const newsFavUpper = hasStrongNewsFor({ name: upper.name, keywords: [] }, s) || /menções públicas/.test((upper.why||[]).join(' ').toLowerCase());
-  const newsFavLower = hasStrongNewsFor({ name: lower.name, keywords: [] }, s) || /menções públicas/.test((lower.why||[]).join(' ').toLowerCase());
-  if (newsFavUpper && !newsFavLower) return `há indícios públicos recentes favorecendo ${upper.name}`;
+  // SAP S/4 x ECC
+  if (/sap s\/?4hana/.test(uName) && /sap ecc/.test(lName)) customText.push('o contexto indica adoção mais recente (S/4HANA) em vez do ECC');
+  if (/sap ecc/.test(uName) && /sap s\/?4hana/.test(lName)) customText.push('há sinais de ambiente SAP mais antigo (ECC)');
 
-  // 2) Regras de família e versões
-  if (/sap s\/?4hana/.test(uName) && /sap ecc/.test(lName)) return 'o contexto aponta para adoção mais recente (S/4HANA) vs. ECC';
-  if (/sap ecc/.test(uName) && /sap s\/?4hana/.test(lName)) return 'os indícios sugerem ambiente SAP mais antigo (ECC)';
-  if (/totvs protheus/.test(uName) && /totvs rm/.test(lName)) return 'o cenário geral valoriza Protheus (versatilidade) frente ao RM';
-  if (/totvs rm/.test(uName) && /totvs protheus/.test(lName)) return 'vertical de RH/saúde/educação favorece RM';
+  // TOTVS Protheus x RM
+  if (/totvs protheus/.test(uName) && /totvs rm/.test(lName)) customText.push('a versatilidade do Protheus pesa mais que o RM neste cenário');
+  if (/totvs rm/.test(uName) && /totvs protheus/.test(lName)) customText.push('o foco de RH/saúde/educação favorece o RM');
 
-  // 3) Sinergia fiscal/ERP líder
-  if (type === 'FISCAL') {
-    if (/totvs – fiscal interno/i.test(upper.name) && !/totvs – fiscal interno/i.test(lower.name)) {
-      return 'em TOTVS o fiscal costuma ser tratado no próprio ERP';
-    }
-    if (/add-on.*business one/i.test(upper.name) && !/add-on.*business one/i.test(lower.name)) {
-      return 'no SAP Business One o fiscal é tipicamente via add-on homologado';
-    }
-    const uShort = (upper.whyShort||'').toLowerCase();
-    const lShort = (lower.whyShort||'').toLowerCase();
-    if (/alinha com/.test(uShort) && !/alinha com/.test(lShort)) return 'a integração com o ERP líder é mais direta no primeiro colocado';
+  // multinacionalidade e multiempresa
+  if ((s.multinacional || s.multiempresa) && /sap/.test(uName) && !/sap/.test(lName)) {
+    customText.push('perfil multinacional/multiempresa pende ao ecossistema SAP');
   }
 
-  // 4) Porte
-  const getMeta = (name, pool) => pool.find(c => c.name.toLowerCase() === name.toLowerCase());
-  const uMeta = type === 'ERP' ? getMeta(upper.name, ERPS) : getMeta(upper.name, FISCALS);
-  const lMeta = type === 'ERP' ? getMeta(lower.name, ERPS) : getMeta(lower.name, FISCALS);
-  const emp = s?.employeesReported || 0;
-  const inRange = (meta) => {
-    if (!meta || !meta.sizeHint) return true;
-    const min = meta.sizeHint.minEmp ?? 0;
-    const max = meta.sizeHint.maxEmp ?? Infinity;
-    return emp ? (emp >= min && emp <= max) : true;
-  };
-  if (emp && uMeta && lMeta && inRange(uMeta) && !inRange(lMeta)) {
-    return `o porte atual se encaixa melhor na faixa típica de ${upper.name}`;
+  // porte muito baixo → BPO no fiscal
+  if (type === 'FISCAL' && s.revenueReported > 0 && s.revenueReported <= 150e6 && /bpo/.test(uName) && /(mastersaf|thomson|sovos|synchro)/.test(lName)) {
+    customText.push('para receita menor, BPO fiscal tende a ter melhor custo/benefício');
   }
 
-  // 5) Segmento/regulação
-  const uWhy = (upper.why||[]).join(' ').toLowerCase();
-  const lWhy = (lower.why||[]).join(' ').toLowerCase();
-  if ((/manufatura|distribui(ç|c)[aã]o|varejo|servi(c|ç)os|financials|regulad/.test(uWhy)) &&
-      !/manufatura|distribui(ç|c)[aã]o|varejo|servi(c|ç)os|financials|regulad/.test(lWhy)) {
-    return 'a aderência ao segmento/regulação está mais clara no primeiro colocado';
+  // TOTVS fiscal interno
+  if (type === 'FISCAL' && /totvs – fiscal interno/i.test(upper.name) && !/totvs – fiscal interno/i.test(lower.name)) {
+    customText.push('no TOTVS o fiscal costuma ser tratado no próprio ERP');
   }
 
-  // 6) Multinacional/multiempresa
-  if ((s?.multinacional || s?.multiempresa) && /multiempresa|global/.test(uWhy) && !/multiempresa|global/.test(lWhy)) {
-    return 'o perfil multinacional/multiempresa favorece o primeiro colocado';
+  // B1 add-on
+  if (type === 'FISCAL' && /add-on.*business one/i.test(upper.name) && !/add-on.*business one/i.test(lower.name)) {
+    customText.push('no SAP Business One o fiscal é normalmente via add-on homologado');
   }
 
-  // 7) Sinais de ecossistema
-  if (/sap/.test(uName) && !/sap/.test(lName) && s?.hasSap) return 'há sinais de ecossistema SAP favorecendo o primeiro colocado';
-  if (/totvs|protheus|rm/.test(uName) && !/totvs|protheus|rm/.test(lName) && s?.hasTotvs) return 'há sinais de ecossistema TOTVS favorecendo o primeiro colocado';
-  if (/oracle|netsuite/.test(uName) && !/oracle|netsuite/.test(lName) && s?.hasOracle) return 'há sinais de ecossistema Oracle/NetSuite favorecendo o primeiro colocado';
-
-  // 8) Custo/TCO (fiscal em empresas pequenas)
-  if (type === 'FISCAL' && s?.revenueReported > 0 && s.revenueReported <= 150e6) {
-    if (/bpo fiscal/i.test(uName) && /(mastersaf|thomson|sovos|synchro)/i.test(lName)) {
-      return 'para receita mais baixa, BPO fiscal tende a ter melhor TCO';
-    }
-  }
-
-  // 9) Fallback genérico, mas objetivo
-  return 'o conjunto de porte, segmento e sinais públicos favorece o primeiro colocado';
+  // ordenar por impacto e compor até 2 razões
+  const main = diffs.filter(d => d.diff >= 4).sort((a,b)=>b.diff-a.diff).slice(0,2).map(d => d.map());
+  const pool = [...customText, ...main];
+  const unique = [];
+  for (const t of pool) { if (t && !unique.some(x => x.toLowerCase() === t.toLowerCase())) unique.push(t); if (unique.length >= 2) break; }
+  return unique.length ? unique : ['o conjunto de evidências e encaixe pende ao primeiro colocado'];
 }
 
-function explainDelta(upper, lower, type /* 'ERP' | 'FISCAL' */) {
-  return simpleReason(upper, lower, deriveSignals.__lastSignals, type);
-}
-
-// adiciona a frase FINAL em **negrito** ao término da lista `why`
+// monta linhas finais em **negrito** no fim da lista `why`
 function injectWhyNot(list, type /* 'ERP' | 'FISCAL' */) {
   const s = deriveSignals.__lastSignals;
   if (!list || list.length < 2) return list;
 
-  function appendBadge(target, line) {
-    if (!line) return;
-    const badge = `**${line}**`; // apenas negrito, sem HTML
-    if (line.includes('primeiro')) target.why_not_first = badge;
-    if (line.includes('segundo'))  target.why_not_second = badge;
+  function appendBoldLine(target, prefix, reasons) {
+    if (!reasons || !reasons.length) return;
+    const line = `${prefix} ${reasons.length === 1 ? reasons[0] : `${reasons[0]} e ${reasons[1]}`}.`;
+    const bold = `**${line}**`;
     const existing = Array.isArray(target.why) ? target.why : [];
-    target.why = [...existing, badge]; // adiciona no final
+    // evita duplicar
+    if (!existing.some(x => String(x).toLowerCase() === bold.toLowerCase())) {
+      target.why = [...existing, bold];
+    }
+    return bold;
   }
 
   if (list[1]) {
-    const r = simpleReason(list[0], list[1], s, type);
-    if (r) appendBadge(list[1], `Não está em primeiro porque ${r}.`);
+    const reasons = reasonsFromBreakdown(list[0], list[1], s, type);
+    const bold = appendBoldLine(list[1], 'Não está em primeiro porque', reasons);
+    if (bold) list[1].why_not_first = bold;
   }
   if (list[2]) {
-    const r1 = simpleReason(list[0], list[2], s, type);
-    const r2 = simpleReason(list[1], list[2], s, type);
-    if (r1) appendBadge(list[2], `Não está em primeiro porque ${r1}.`);
-    if (r2) appendBadge(list[2], `Não está em segundo porque ${r2}.`);
+    const reasons1 = reasonsFromBreakdown(list[0], list[2], s, type);
+    const bold1 = appendBoldLine(list[2], 'Não está em primeiro porque', reasons1);
+    if (bold1) list[2].why_not_first = bold1;
+
+    const reasons2 = reasonsFromBreakdown(list[1], list[2], s, type);
+    const bold2 = appendBoldLine(list[2], 'Não está em segundo porque', reasons2);
+    if (bold2) list[2].why_not_second = bold2;
   }
   return list;
 }
@@ -590,17 +577,16 @@ function collapseTotvsFamily(scored, s) {
 
 function buildTop3(relatorio) {
   const s = deriveSignals(relatorio);
-  // tornar sinais acessíveis ao explainDelta/simpleReason
   deriveSignals.__lastSignals = s;
 
-  // ERP: score → colapsa SAP Core e TOTVS family → rank
+  // ERP
   let erpRankRaw = ERPS.map(c => scoreERP(c, s));
   erpRankRaw = collapseSapCore(erpRankRaw, s);
   erpRankRaw = collapseTotvsFamily(erpRankRaw, s);
   erpRankRaw.sort((a,b) => b.rawScore - a.rawScore);
   const erp_top3 = normalizeTop3(erpRankRaw);
 
-  // Fiscal: injeta candidato "TOTVS – Fiscal interno" quando ERP #1 for TOTVS; e add-on para B1
+  // Fiscal (injeta TOTVS interno e B1 add-on conforme ERP #1)
   const erpTop1Name = erp_top3[0]?.name || '';
   let fiscals = [...FISCALS];
   if (/^totvs\b|protheus|rm\b/i.test(erpTop1Name)) {
@@ -623,7 +609,7 @@ function buildTop3(relatorio) {
   const fiscalRankRaw = fiscals.map(c => scoreFiscal(c, s, erpTop1Name)).sort((a,b) => b.rawScore - a.rawScore);
   const fiscal_top3 = normalizeTop3(fiscalRankRaw);
 
-  // mensagens “não está em primeiro/segundo”
+  // frases finais
   injectWhyNot(erp_top3, 'ERP');
   injectWhyNot(fiscal_top3, 'FISCAL');
 
