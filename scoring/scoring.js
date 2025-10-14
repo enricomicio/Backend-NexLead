@@ -51,11 +51,12 @@ function uniqPush(arr, txt) {
   if (!t) return;
   if (!arr.some(x => x.toLowerCase() === t.toLowerCase())) arr.push(t);
 }
-function sentence(list, max = 2) {
+function sentence(list, max = 3) {
   const a = list.slice(0, max);
   if (!a.length) return '';
   if (a.length === 1) return a[0];
-  return `${a[0]} e ${a[1]}`;
+  if (a.length === 2) return `${a[0]} e ${a[1]}`;
+  return `${a[0]}, ${a[1]} e ${a[2]}`;
 }
 
 /* ----------------------------- SIGNALS ---------------------------------- */
@@ -343,7 +344,7 @@ function scoreERP(candidate, s) {
   if (s.varejo && ((candidate.tags||[]).includes('distribuição')||(candidate.tags||[]).includes('varejo'))) bullets.push('distribuição/varejo');
   if (s.cloudSaaS && ((candidate.tags||[]).includes('saas')||(candidate.tags||[]).includes('cloud'))) bullets.push('cloud/SaaS');
   if (!bullets.length && s.employeesReported) bullets.push(`porte ≈ ${s.employeesReported.toLocaleString('pt-BR')}`);
-  const whyShort = sentence(bullets, 2);
+  const whyShort = sentence(bullets, 3);
 
   const pain_points = erpPainPoints(candidate, s);
   return { name: candidate.name, rawScore: score, breakdown, why:[...why], whyShort, pain_points, criteria: criteriaPanel(s) };
@@ -428,7 +429,7 @@ function scoreFiscal(candidate, s, erpTop1Name) {
   if (/totvs.*interno/i.test(nm)) bullets.push('tratado no próprio ERP');
   if (/add-on.*business one/i.test(nm)) bullets.push('add-on homologado (B1)');
   if (emp > 0) bullets.push(`porte ≈ ${emp.toLocaleString('pt-BR')}`);
-  const whyShort = sentence(bullets, 2);
+  const whyShort = sentence(bullets, 3);
 
   const pain_points = fiscalPainPoints(candidate, s, erpTop1Name);
   return { name: candidate.name, rawScore: score, breakdown, why:[...why], whyShort, pain_points, criteria: criteriaPanel(s) };
@@ -456,112 +457,97 @@ function normalizeTop3(list) {
 
 /* --------------------------- COMPARADORES -------------------------------- */
 
-// Gera um motivo curto e contextual com base em sinais (s) e nos breakdowns.
+// seleciona uma razão curta, contextualmente variada, para explicar por que o item ficou abaixo
 function simpleReason(upper, lower, s, type /* 'ERP' | 'FISCAL' */) {
   if (!upper || !lower) return '';
-  const ub = upper.breakdown || {}, lb = lower.breakdown || {};
+
   const uName = (upper.name||'').toLowerCase();
   const lName = (lower.name||'').toLowerCase();
 
-  // 1) Evidências/notícias
-  if ((ub.evidence||0) - (lb.evidence||0) >= 6) {
-    return `há evidências públicas mais fortes a favor do ${upper.name}`;
-  }
+  // 1) Evidência pública
+  const newsFavUpper = hasStrongNewsFor({ name: upper.name, keywords: [] }, s) || /menções públicas/.test((upper.why||[]).join(' ').toLowerCase());
+  const newsFavLower = hasStrongNewsFor({ name: lower.name, keywords: [] }, s) || /menções públicas/.test((lower.why||[]).join(' ').toLowerCase());
+  if (newsFavUpper && !newsFavLower) return `há indícios públicos recentes favorecendo ${upper.name}`;
 
-  // 2) Multinacional / multiempresa
-  if ((s.multinacional || s.multiempresa)) {
-    const uHas = /multiempresa|global/.test((upper.why||[]).join(' ').toLowerCase());
-    const lHas = /multiempresa|global/.test((lower.why||[]).join(' ').toLowerCase());
-    if (uHas && !lHas) return `o perfil multinacional/multiempresa favorece o ${upper.name}`;
-  }
+  // 2) Regras de família e versões
+  if (/sap s\/?4hana/.test(uName) && /sap ecc/.test(lName)) return 'o contexto aponta para adoção mais recente (S/4HANA) vs. ECC';
+  if (/sap ecc/.test(uName) && /sap s\/?4hana/.test(lName)) return 'os indícios sugerem ambiente SAP mais antigo (ECC)';
+  if (/totvs protheus/.test(uName) && /totvs rm/.test(lName)) return 'o cenário geral valoriza Protheus (versatilidade) frente ao RM';
+  if (/totvs rm/.test(uName) && /totvs protheus/.test(lName)) return 'vertical de RH/saúde/educação favorece RM';
 
-  // 3) Porte (employees vs sizeHint)
-  const emp = s?.employeesReported || 0;
-  const getMeta = (name, pool) => pool.find(c => c.name.toLowerCase() === name.toLowerCase());
-  const um = type === 'ERP' ? getMeta(upper.name, ERPS) : getMeta(upper.name, FISCALS);
-  const lm = type === 'ERP' ? getMeta(lower.name, ERPS) : getMeta(lower.name, FISCALS);
-  if (emp && um && lm && um.sizeHint) {
-    const inRange = (meta) => {
-      const min = meta.sizeHint?.minEmp ?? 0, max = meta.sizeHint?.maxEmp ?? Infinity;
-      return emp >= min && emp <= max;
-    };
-    if (inRange(um) && lm.sizeHint && !inRange(lm)) {
-      return `o porte atual se encaixa melhor na faixa típica do ${upper.name}`;
-    }
-  }
-  if ((ub.size_fit||0) - (lb.size_fit||0) >= 6) {
-    return `o encaixe de porte está mais aderente ao ${upper.name}`;
-  }
-
-  // 4) Segmento / setor regulado
-  if (s.setor_regulado && (ub.segment_fit||0) - (lb.segment_fit||0) >= 4) {
-    return `o histórico em setor regulado favorece o ${upper.name}`;
-  }
-  if ((ub.segment_fit||0) - (lb.segment_fit||0) >= 6) {
-    return `a aderência ao segmento está mais clara no ${upper.name}`;
-  }
-
-  // 5) Regras de família (ERP)
-  if (type === 'ERP') {
-    if (/sap s\/?4hana/.test(uName) && /sap ecc/.test(lName)) return 'a sinalização recente pende a S/4HANA (vs. ECC)';
-    if (/sap ecc/.test(uName) && /sap s\/?4hana/.test(lName)) return 'os indícios apontam para ambiente SAP mais antigo (ECC)';
-    if (/totvs protheus/.test(uName) && /totvs rm/.test(lName)) return 'o contexto indica Protheus (mais versátil que RM)';
-    if (/totvs rm/.test(uName) && /totvs protheus/.test(lName)) return 'o contexto indica RM (força em RH/saúde/educação)';
-  }
-
-  // 6) Sinergia fiscal com ERP líder
+  // 3) Sinergia fiscal/ERP líder
   if (type === 'FISCAL') {
-    if ((ub.synergy||0) - (lb.synergy||0) >= 6) {
-      return `a integração com o ERP líder é mais direta no ${upper.name}`;
+    if (/totvs – fiscal interno/i.test(upper.name) && !/totvs – fiscal interno/i.test(lower.name)) {
+      return 'em TOTVS o fiscal costuma ser tratado no próprio ERP';
     }
-    if (/totvs – fiscal interno/.test(upper.name) && !/totvs – fiscal interno/.test(lower.name)) {
-      return 'em TOTVS, o fiscal costuma ser tratado no próprio ERP';
+    if (/add-on.*business one/i.test(upper.name) && !/add-on.*business one/i.test(lower.name)) {
+      return 'no SAP Business One o fiscal é tipicamente via add-on homologado';
     }
-    if (/add-on.*business one/.test(upper.name) && !/add-on.*business one/.test(lower.name)) {
-      return 'no SAP Business One o fiscal normalmente é via add-on homologado';
+    const uShort = (upper.whyShort||'').toLowerCase();
+    const lShort = (lower.whyShort||'').toLowerCase();
+    if (/alinha com/.test(uShort) && !/alinha com/.test(lShort)) return 'a integração com o ERP líder é mais direta no primeiro colocado';
+  }
+
+  // 4) Porte
+  const getMeta = (name, pool) => pool.find(c => c.name.toLowerCase() === name.toLowerCase());
+  const uMeta = type === 'ERP' ? getMeta(upper.name, ERPS) : getMeta(upper.name, FISCALS);
+  const lMeta = type === 'ERP' ? getMeta(lower.name, ERPS) : getMeta(lower.name, FISCALS);
+  const emp = s?.employeesReported || 0;
+  const inRange = (meta) => {
+    if (!meta || !meta.sizeHint) return true;
+    const min = meta.sizeHint.minEmp ?? 0;
+    const max = meta.sizeHint.maxEmp ?? Infinity;
+    return emp ? (emp >= min && emp <= max) : true;
+  };
+  if (emp && uMeta && lMeta && inRange(uMeta) && !inRange(lMeta)) {
+    return `o porte atual se encaixa melhor na faixa típica de ${upper.name}`;
+  }
+
+  // 5) Segmento/regulação
+  const uWhy = (upper.why||[]).join(' ').toLowerCase();
+  const lWhy = (lower.why||[]).join(' ').toLowerCase();
+  if ((/manufatura|distribui(ç|c)[aã]o|varejo|servi(c|ç)os|financials|regulad/.test(uWhy)) &&
+      !/manufatura|distribui(ç|c)[aã]o|varejo|servi(c|ç)os|financials|regulad/.test(lWhy)) {
+    return 'a aderência ao segmento/regulação está mais clara no primeiro colocado';
+  }
+
+  // 6) Multinacional/multiempresa
+  if ((s?.multinacional || s?.multiempresa) && /multiempresa|global/.test(uWhy) && !/multiempresa|global/.test(lWhy)) {
+    return 'o perfil multinacional/multiempresa favorece o primeiro colocado';
+  }
+
+  // 7) Sinais de ecossistema
+  if (/sap/.test(uName) && !/sap/.test(lName) && s?.hasSap) return 'há sinais de ecossistema SAP favorecendo o primeiro colocado';
+  if (/totvs|protheus|rm/.test(uName) && !/totvs|protheus|rm/.test(lName) && s?.hasTotvs) return 'há sinais de ecossistema TOTVS favorecendo o primeiro colocado';
+  if (/oracle|netsuite/.test(uName) && !/oracle|netsuite/.test(lName) && s?.hasOracle) return 'há sinais de ecossistema Oracle/NetSuite favorecendo o primeiro colocado';
+
+  // 8) Custo/TCO (fiscal em empresas pequenas)
+  if (type === 'FISCAL' && s?.revenueReported > 0 && s.revenueReported <= 150e6) {
+    if (/bpo fiscal/i.test(uName) && /(mastersaf|thomson|sovos|synchro)/i.test(lName)) {
+      return 'para receita mais baixa, BPO fiscal tende a ter melhor TCO';
     }
   }
 
-  // 7) Custo/TCO em receita baixa (fiscal)
-  if (type === 'FISCAL' && s.revenueReported > 0 && s.revenueReported <= 150e6) {
-    if ((lb.cost_penalties||0) - (ub.cost_penalties||0) >= 8) {
-      return 'o custo/complexidade das opções enterprise pesa contra a segunda colocada';
-    }
-  }
-
-  // 8) Sinais de ecossistema
-  if (/sap/.test(uName) && !/sap/.test(lName) && s?.hasSap) return `há sinais de ecossistema SAP favorecendo o ${upper.name}`;
-  if (/totvs|protheus|rm/.test(uName) && !/totvs|protheus|rm/.test(lName) && s?.hasTotvs) return `há sinais de ecossistema TOTVS favorecendo o ${upper.name}`;
-  if (/oracle|netsuite/.test(uName) && !/oracle|netsuite/.test(lName) && s?.hasOracle) return `há sinais de ecossistema Oracle/NetSuite favorecendo o ${upper.name}`;
-
-  // 9) Fallback (frases alternativas para evitar repetição)
-  const candidates = [];
-  if ((ub.evidence||0) > (lb.evidence||0)) candidates.push(`evidências públicas mais favoráveis ao ${upper.name}`);
-  if ((ub.size_fit||0) > (lb.size_fit||0)) candidates.push(`melhor ajuste de porte no ${upper.name}`);
-  if ((ub.segment_fit||0) > (lb.segment_fit||0)) candidates.push(`maior aderência ao segmento no ${upper.name}`);
-  if (type === 'FISCAL' && (ub.synergy||0) > (lb.synergy||0)) candidates.push(`sinergia superior com o ERP líder`);
-  if (candidates.length) return sentence(candidates, 1);
-  return 'o conjunto de fatores (porte, segmento e sinais públicos) favorece o primeiro colocado';
+  // 9) Fallback genérico, mas objetivo
+  return 'o conjunto de porte, segmento e sinais públicos favorece o primeiro colocado';
 }
 
 function explainDelta(upper, lower, type /* 'ERP' | 'FISCAL' */) {
   return simpleReason(upper, lower, deriveSignals.__lastSignals, type);
 }
 
-// Tarja final e discreta (negrito + highlight suave) adicionada AO FINAL da lista `why`.
+// adiciona a frase FINAL em **negrito** ao término da lista `why`
 function injectWhyNot(list, type /* 'ERP' | 'FISCAL' */) {
   const s = deriveSignals.__lastSignals;
   if (!list || list.length < 2) return list;
 
   function appendBadge(target, line) {
     if (!line) return;
-    const badge = `**<span style="background:#eef2ff;color:#1f2a44;padding:2px 6px;border-radius:4px;font-weight:600">${line}</span>**`;
-    if (/primeiro/.test(line)) target.why_not_first = badge;
-    if (/segundo/.test(line))  target.why_not_second = badge;
+    const badge = `**${line}**`; // apenas negrito, sem HTML
+    if (line.includes('primeiro')) target.why_not_first = badge;
+    if (line.includes('segundo'))  target.why_not_second = badge;
     const existing = Array.isArray(target.why) ? target.why : [];
-    // remove possíveis badges anteriores repetidos
-    const cleaned = existing.filter(x => !String(x).includes('why-not-badge'));
-    target.why = [...cleaned, badge];
+    target.why = [...existing, badge]; // adiciona no final
   }
 
   if (list[1]) {
@@ -604,16 +590,17 @@ function collapseTotvsFamily(scored, s) {
 
 function buildTop3(relatorio) {
   const s = deriveSignals(relatorio);
+  // tornar sinais acessíveis ao explainDelta/simpleReason
   deriveSignals.__lastSignals = s;
 
-  // ERP
+  // ERP: score → colapsa SAP Core e TOTVS family → rank
   let erpRankRaw = ERPS.map(c => scoreERP(c, s));
   erpRankRaw = collapseSapCore(erpRankRaw, s);
   erpRankRaw = collapseTotvsFamily(erpRankRaw, s);
   erpRankRaw.sort((a,b) => b.rawScore - a.rawScore);
   const erp_top3 = normalizeTop3(erpRankRaw);
 
-  // Fiscal (TOTVS interno / B1 add-on)
+  // Fiscal: injeta candidato "TOTVS – Fiscal interno" quando ERP #1 for TOTVS; e add-on para B1
   const erpTop1Name = erp_top3[0]?.name || '';
   let fiscals = [...FISCALS];
   if (/^totvs\b|protheus|rm\b/i.test(erpTop1Name)) {
@@ -636,7 +623,7 @@ function buildTop3(relatorio) {
   const fiscalRankRaw = fiscals.map(c => scoreFiscal(c, s, erpTop1Name)).sort((a,b) => b.rawScore - a.rawScore);
   const fiscal_top3 = normalizeTop3(fiscalRankRaw);
 
-  // Frases finais
+  // mensagens “não está em primeiro/segundo”
   injectWhyNot(erp_top3, 'ERP');
   injectWhyNot(fiscal_top3, 'FISCAL');
 
