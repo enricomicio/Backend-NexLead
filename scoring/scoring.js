@@ -528,20 +528,32 @@ function explainDelta(upper, lower, type /* 'ERP' | 'FISCAL' */) {
   return simpleReason(upper, lower, deriveSignals.__lastSignals, type);
 }
 
-// monta frases finais em NEGRITO, fora do corpo de justificativas
+// >>> AJUSTE: monta frases em NEGRITO e também injeta no topo do array `why`
 function injectWhyNot(list, type /* 'ERP' | 'FISCAL' */) {
   const s = deriveSignals.__lastSignals;
   if (!list || list.length < 2) return list;
 
+  function pushFrontLine(target, line) {
+    if (!line) return;
+    const bold = `**${line}**`;
+    // campos dedicados (para futuras UIs)
+    if (/primeiro/.test(line)) target.why_not_first = bold;
+    if (/segundo/.test(line))  target.why_not_second = bold;
+    // garante visibilidade na UI atual: primeira justificativa
+    const existing = Array.isArray(target.why) ? target.why : [];
+    const filtered = existing.filter(x => !String(x).startsWith('**Não está em '));
+    target.why = [bold, ...filtered];
+  }
+
   if (list[1]) {
     const r = simpleReason(list[0], list[1], s, type);
-    if (r) list[1].why_not_first = `**Não está em primeiro porque ${r}.**`;
+    if (r) pushFrontLine(list[1], `Não está em primeiro porque ${r}.`);
   }
   if (list[2]) {
     const r1 = simpleReason(list[0], list[2], s, type);
     const r2 = simpleReason(list[1], list[2], s, type);
-    if (r1) list[2].why_not_first  = `**Não está em primeiro porque ${r1}.**`;
-    if (r2) list[2].why_not_second = `**Não está em segundo porque ${r2}.**`;
+    if (r1) pushFrontLine(list[2], `Não está em primeiro porque ${r1}.`);
+    if (r2) pushFrontLine(list[2], `Não está em segundo porque ${r2}.`);
   }
   return list;
 }
@@ -625,4 +637,3 @@ function buildTop3(relatorio) {
 }
 
 module.exports = { buildTop3 };
-
