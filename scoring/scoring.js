@@ -457,130 +457,82 @@ function normalizeTop3(list) {
 
 /* --------------------------- COMPARADORES -------------------------------- */
 
-// NOVO: razões contextuais (sem depender de thresholds) — até 2 por comparação
-function contextualReasons(upper, lower, s, type /* 'ERP' | 'FISCAL' */) {
-  const reasons = [];
-  if (!upper || !lower) return reasons;
+// helpers p/ variações de frase
+function fmtEmp(n) { return n ? `≈ ${n.toLocaleString('pt-BR')} colaboradores` : 'não localizado'; }
+function fmtRev(n) { return n ? `≈ R$ ${n.toLocaleString('pt-BR')}/ano` : 'não localizado'; }
+function fmtSeg(s) { return s && s.trim() ? s : 'não localizado'; }
+function choose(arr, seed) { const idx = Math.abs(seed) % arr.length; return arr[idx]; }
+function seedFrom(str) { let h = 0; for (let i=0;i<str.length;i++) h = ((h<<5)-h)+str.charCodeAt(i); return h; }
 
-  const uName = (upper.name||'').toLowerCase();
-  const lName = (lower.name||'').toLowerCase();
-  const emp   = s?.employeesReported || 0;
-  const rev   = s?.revenueReported || 0;
-
-  // 1) Evidência pública (notícia/menção)
-  const strongUpper = hasStrongNewsFor({ name: upper.name, keywords: [] }, s);
-  const strongLower = hasStrongNewsFor({ name: lower.name, keywords: [] }, s);
-  const evidGap = (countVendorEvidence({ name: upper.name, keywords: [] }, s) -
-                   countVendorEvidence({ name: lower.name, keywords: [] }, s));
-  if ((strongUpper && !strongLower) || evidGap >= 1) {
-    reasons.push('há notícia/menção pública recente favorecendo o primeiro colocado');
-  }
-
-  // 2) Regras de família SAP/TOTVS
-  if (/sap s\/?4hana/.test(uName) && /sap ecc/.test(lName)) reasons.push('o contexto indica adoção mais recente (S/4HANA) em vez do ECC');
-  if (/sap ecc/.test(uName) && /sap s\/?4hana/.test(lName)) reasons.push('há sinais de ambiente SAP mais antigo (ECC)');
-  if (/totvs protheus/.test(uName) && /totvs rm/.test(lName)) reasons.push('a versatilidade do Protheus pesa mais que o RM neste cenário');
-  if (/totvs rm/.test(uName) && /totvs protheus/.test(lName)) reasons.push('o foco de RH/saúde/educação favorece o RM');
-
-  // 3) Multinacionalidade / multiempresa favorecendo ecossistemas globais
-  if ((s.multinacional || s.multiempresa)) {
-    const upperGlobal = /sap|oracle|dynamics|multiempresa|global/.test(uName) || /multiempresa/.test((upper.why||[]).join(' ').toLowerCase());
-    const lowerLocal  = /totvs|protheus|rm|omie|tiny|sankhya|senior/.test(lName);
-    if (upperGlobal && lowerLocal) reasons.push('perfil multinacional/multiempresa favorece o primeiro colocado');
-  }
-
-  // 4) Porte — fora da faixa do segundo
-  function metaByName(pool, nm) { return pool.find(c => (c.name||'').toLowerCase() === nm); }
-  const uMeta = type === 'ERP' ? metaByName(ERPS, uName) : metaByName(FISCALS, uName);
-  const lMeta = type === 'ERP' ? metaByName(ERPS, lName) : metaByName(FISCALS, lName);
-  const inRange = (meta) => {
-    if (!meta || !meta.sizeHint || !emp) return true;
-    const min = meta.sizeHint.minEmp ?? 0;
-    const max = meta.sizeHint.maxEmp ?? Infinity;
-    return emp >= min && emp <= max;
-  };
-  if (emp && uMeta && lMeta && inRange(uMeta) && !inRange(lMeta)) {
-    reasons.push(`o porte atual se encaixa melhor no primeiro colocado`);
-  }
-
-  // 5) Setor regulado
-  const uWhy = (upper.why||[]).join(' ').toLowerCase();
-  const lWhy = (lower.why||[]).join(' ').toLowerCase();
-  if (s.setor_regulado && /financials|regulad/.test(uWhy) && !/financials|regulad/.test(lWhy)) {
-    reasons.push('maior aderência a requisitos regulatórios no primeiro colocado');
-  }
-
-  // 6) Stack/Cloud
-  if (s.hasAzure && /dynamics/.test(uName) && !/dynamics/.test(lName)) {
-    reasons.push('stack Microsoft/Azure favorece o primeiro colocado');
-  }
-
-  // 7) E-commerce
-  if (type === 'FISCAL' && s.ecom && /avalara/.test(uName) && !/avalara/.test(lName)) {
-    reasons.push('e-commerce sugere melhor encaixe no primeiro colocado');
-  }
-
-  // 8) Sinergia forte com o ERP líder (Fiscal)
-  if (type === 'FISCAL') {
-    if (/totvs – fiscal interno/.test(upper.name) && !/totvs – fiscal interno/.test(lower.name)) {
-      reasons.push('no TOTVS, o fiscal costuma ser tratado no próprio ERP');
-    }
-    if (/add-on.*business one/.test(upper.name) && !/add-on.*business one/.test(lower.name)) {
-      reasons.push('no SAP Business One o fiscal é normalmente via add-on homologado');
-    }
-    if (/sap/.test((upper.whyShort||'').toLowerCase()) && !/sap/.test((lower.whyShort||'').toLowerCase())) {
-      reasons.push('a integração com o ERP líder é mais direta no primeiro colocado');
-    }
-  }
-
-  // 9) Custo/TCO — receita baixa x soluções enterprise
-  if (type === 'FISCAL' && rev > 0 && rev <= 150e6) {
-    if (/bpo/.test(uName) && /(mastersaf|thomson|sovos|synchro)/.test(lName)) {
-      reasons.push('para receita menor, custo/TCO favorece o BPO fiscal');
-    }
-  }
-
-  // Limita a 2 razões e garante variedade
-  const out = [];
-  for (const r of reasons) {
-    if (!out.some(x => x.toLowerCase() === r.toLowerCase())) out.push(r);
-    if (out.length >= 2) break;
-  }
-  // fallback se nada disparou
-  return out.length ? out : ['o conjunto de fatores (porte, segmento e sinais públicos) favorece o primeiro colocado'];
-}
-
-// monta linhas finais em **negrito** no fim da lista `why`
+// sempre escreve frases padronizadas no 2º e 3º
 function injectWhyNot(list, type /* 'ERP' | 'FISCAL' */) {
   const s = deriveSignals.__lastSignals;
-  if (!list || list.length < 2) return list;
+  if (!list || list.length === 0) return list;
 
-  function appendBoldLine(target, prefix, reasons) {
-    if (!reasons || !reasons.length) return;
-    const line = `${prefix} ${reasons.length === 1 ? reasons[0] : `${reasons[0]} e ${reasons[1]}`}.`;
+  const empTxt = fmtEmp(s?.employeesReported || 0);
+  const revTxt = fmtRev(s?.revenueReported || 0);
+  const segTxt = fmtSeg(s?.seg || '');
+
+  if (list[0]) {
+    // nada aqui — apenas referência para 2º/3º
+  }
+
+  // 2º colocado
+  if (list[1] && list[0]) {
+    const firstName = list[0].name;
+    const variants = [
+      `De acordo com o número de funcionários (${empTxt}), o faturamento (${revTxt}), o segmento (${segTxt}) e a dinâmica observada em site e notícias, **${firstName}** leva ligeira vantagem.`,
+      `Considerando funcionários (${empTxt}), faturamento (${revTxt}), segmento (${segTxt}) e sinais públicos, **${firstName}** aparece um passo à frente.`,
+      `À luz dos indicadores mapeados — funcionários (${empTxt}), faturamento (${revTxt}) e segmento (${segTxt}) — a preferência recai levemente sobre **${firstName}**.`,
+      `Pelos dados de porte (${empTxt}), receita (${revTxt}) e segmento (${segTxt}), a liderança fica com **${firstName}**.`,
+      `Com base no porte (${empTxt}), faixa de receita (${revTxt}) e no enquadramento setorial (${segTxt}), **${firstName}** se sobressai por pequena margem.`
+    ];
+    const seed = seedFrom(list[1].name + firstName + (s?.seg||''));
+    const line = choose(variants, seed);
     const bold = `**${line}**`;
-    const existing = Array.isArray(target.why) ? target.why : [];
-    // evita duplicar e sempre no fim
+    const existing = Array.isArray(list[1].why) ? list[1].why : [];
     if (!existing.some(x => String(x).toLowerCase() === bold.toLowerCase())) {
-      target.why = [...existing, bold];
+      list[1].why = [...existing, bold];
     }
-    return bold;
+    list[1].why_not_first = bold;
   }
 
-  if (list[1]) {
-    const reasons = contextualReasons(list[0], list[1], s, type);
-    const bold = appendBoldLine(list[1], 'Não está em primeiro porque', reasons);
-    if (bold) list[1].why_not_first = bold;
-  }
+  // 3º colocado
   if (list[2]) {
-    const reasons1 = contextualReasons(list[0], list[2], s, type);
-    const bold1 = appendBoldLine(list[2], 'Não está em primeiro porque', reasons1);
-    if (bold1) list[2].why_not_first = bold1;
-
-    const reasons2 = contextualReasons(list[1], list[2], s, type);
-    const bold2 = appendBoldLine(list[2], 'Não está em segundo porque', reasons2);
-    if (bold2) list[2].why_not_second = bold2;
+    const firstName = list[0]?.name || 'o primeiro colocado';
+    const secondName = list[1]?.name || 'o segundo colocado';
+    const variants3 = [
+      `Esta solução permanece em terceira posição por não superar os principais indicadores identificados, ficando logo atrás de **${firstName}** e **${secondName}**.`,
+      `Mantém-se em terceiro por desempenho inferior nos sinais considerados, situando-se depois de **${firstName}** e **${secondName}**.`,
+      `Fica na terceira colocação por não acompanhar o resultado dos indicadores-chave, abaixo de **${firstName}** e **${secondName}**.`,
+      `Permanece em terceiro porque não performou o suficiente frente aos critérios avaliados, atrás de **${firstName}** e **${secondName}**.`,
+      `Classifica-se em terceiro por ficar aquém nos fatores mapeados, logo após **${firstName}** e **${secondName}**.`
+    ];
+    const seed3 = seedFrom(list[2].name + firstName + secondName + (s?.seg||''));
+    const line3 = choose(variants3, seed3);
+    const bold3 = `**${line3}**`;
+    const existing3 = Array.isArray(list[2].why) ? list[2].why : [];
+    if (!existing3.some(x => String(x).toLowerCase() === bold3.toLowerCase())) {
+      list[2].why = [...existing3, bold3];
+    }
+    list[2].why_not_first = bold3;
+    // também explicação de "não está em segundo"
+    const variants32 = [
+      `**Não está em segundo** por apresentar menor aderência global aos indicadores levantados.`,
+      `**Não está em segundo** por desempenho ligeiramente inferior no conjunto de sinais.`,
+      `**Não está em segundo** por ficar atrás em porte, segmento ou evidências públicas.`,
+      `**Não está em segundo** por não alcançar a mesma consistência nos critérios avaliados.`,
+      `**Não está em segundo** devido a menor equilíbrio entre porte, receita e alinhamento setorial.`
+    ];
+    const line32 = choose(variants32, seed3 + 7);
+    const bold32 = line32.startsWith('**') ? line32 : `**${line32}**`;
+    const existing32 = Array.isArray(list[2].why) ? list[2].why : [];
+    if (!existing32.some(x => String(x).toLowerCase() === bold32.toLowerCase())) {
+      list[2].why = [...list[2].why, bold32];
+    }
+    list[2].why_not_second = bold32;
   }
+
   return list;
 }
 
@@ -643,7 +595,7 @@ function buildTop3(relatorio) {
   const fiscalRankRaw = fiscals.map(c => scoreFiscal(c, s, erpTop1Name)).sort((a,b) => b.rawScore - a.rawScore);
   const fiscal_top3 = normalizeTop3(fiscalRankRaw);
 
-  // frases finais
+  // frases padronizadas (2º e 3º)
   injectWhyNot(erp_top3, 'ERP');
   injectWhyNot(fiscal_top3, 'FISCAL');
 
