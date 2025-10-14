@@ -1,10 +1,8 @@
-// scoring/scoring.js
 const ERPS = require('./erp_catalog');
 const FISCALS = require('./fiscal_catalog');
 
 /* -------------------------- PARSERS & HELPERS -------------------------- */
 
-// Converte número pt/US com milhar e decimal (robusto)
 function toNumberBR(token) {
   if (!token) return 0;
   let t = String(token).trim().replace(/[^\d.,-]/g, '');
@@ -15,10 +13,8 @@ function toNumberBR(token) {
   const n = parseFloat(t);
   return Number.isFinite(n) ? Math.round(n) : 0;
 }
-
 const toInt = (s) => (s == null ? 0 : toNumberBR(String(s)));
 
-// "1.001–5.000", "3.200+", "1500-2000", "1.2k"
 function parseEmployees(raw) {
   if (!raw) return 0;
   const s = String(raw).toLowerCase().replace(/\s+/g, ' ').trim();
@@ -30,7 +26,6 @@ function parseEmployees(raw) {
   return one ? toNumberBR(one[1]) : 0;
 }
 
-// "R$ 2,3 bi", "200 milhões", "50M", "1bi", "30.000.000,00"
 function parseMoneyLoose(raw) {
   if (!raw) return 0;
   const s = String(raw).toLowerCase().replace(/\s+/g, ' ');
@@ -55,7 +50,6 @@ function uniqPush(arr, txt) {
   if (!t) return;
   if (!arr.some(x => x.toLowerCase() === t.toLowerCase())) arr.push(t);
 }
-
 function sentence(list, max = 3) {
   const a = list.slice(0, max);
   if (!a.length) return '';
@@ -68,7 +62,6 @@ function sentence(list, max = 3) {
 
 function deriveSignals(data) {
   const fullText = JSON.stringify(data || {}).toLowerCase();
-
   const scrubbed = { ...data };
   delete scrubbed.erpatualouprovavel;
   delete scrubbed.solucaofiscalouprovavel;
@@ -124,7 +117,6 @@ function countVendorEvidence(candidate, s) {
   }
   return hits;
 }
-
 function hasStrongNewsFor(candidate, s) {
   const verbs = /(adot|contrat|implant|migrou|escolh|optou|assinou|implement|parceria)/i;
   const neg   = /(deixou|abandonou|substitu|migrou\s+de)/i;
@@ -145,12 +137,11 @@ function inferSapCorePreference(s) {
   const newHints = /(s\/?4hana|rise with sap|public cloud|greenfield|hana\b|migrou\s+para\s+s\/?4|migra(ç|c)[aã]o\s+para\s+s\/?4)/i.test(t);
   if (newHints && !oldHints) return 's4';
   if (oldHints && !newHints) return 'ecc';
-  // empate: se multinacional/enterprise → tende s/4; se texto cita "upgrade para S/4", prefere s/4
   if (/(upgrade|migra(ç|c)[aã]o)\s+.*s\/?4/i.test(t)) return 's4';
   return null;
 }
 
-/* ---------------------- JUSTIFICATIVAS RICAS ---------------------------- */
+/* ---------------------- JUSTIFICATIVAS / CRITÉRIOS ---------------------- */
 
 function enrichWhyRicher(why, candidate, s) {
   const bands = [];
@@ -179,7 +170,6 @@ function enrichWhyRicher(why, candidate, s) {
   for (const b of bands) uniqPush(why, b);
   return why;
 }
-
 function criteriaPanel(s) {
   const fmt = (n) => n ? n.toLocaleString('pt-BR') : 'não localizado';
   const flags = [];
@@ -204,13 +194,12 @@ function erpPainPoints(candidate, s) {
   if (name.includes('business one')||name.includes('business central')||name.includes('omie')) uniqPush(pains,'Foco SMB — pode não escalar em enterprise');
   return pains;
 }
-
 function fiscalVendorSpecificWhy(nm, s, why) {
   if (/mastersaf|onesource|thomson/.test(nm)) {
     uniqPush(why, 'cobertura profunda de SPED/Bloco K e cenários complexos');
-    if (s.multinacional || s.multiempresa) uniqPush(why, 'base enterprise ampla e governança');
+    if (s.multinacional || s.multiempresa) uniqPush(why, 'base enterprise e governança');
   } else if (/sovos/.test(nm)) {
-    uniqPush(why, 'plataforma cloud com atualização contínua de regras fiscais');
+    uniqPush(why, 'plataforma cloud com atualização contínua de regras');
     if (s.cloudSaaS || s.hasAzure) uniqPush(why, 'boa aderência a integrações cloud/multi-ERP');
   } else if (/synchro/.test(nm)) {
     uniqPush(why, 'forte presença nacional com TCO competitivo');
@@ -227,7 +216,6 @@ function fiscalVendorSpecificWhy(nm, s, why) {
     uniqPush(why, 'add-on homologado e econômico para SAP Business One');
   }
 }
-
 function fiscalPainPoints(candidate, s, erpTop1Name) {
   const pains = [];
   const nm = (candidate.name || '').toLowerCase();
@@ -250,7 +238,6 @@ function erpHardFilter(candidate, s) {
   }
   return { excluded: false };
 }
-
 function sizeMatchScore(candidate, s, why) {
   let score = 0;
   const emp = s.employeesReported;
@@ -272,7 +259,6 @@ function sizeMatchScore(candidate, s, why) {
   if (s.multinacional && (candidate.tags?.includes('global') || candidate.tags?.includes('multiempresa'))) { score += 6; uniqPush(why, 'footprint multinacional'); }
   return score;
 }
-
 function segmentMatchScore(candidate, s, why) {
   let score = 0;
   if (s.multiempresa && candidate.tags?.includes('multiempresa')) { score += 8; uniqPush(why,'consolidação/multiempresa'); }
@@ -286,15 +272,13 @@ function segmentMatchScore(candidate, s, why) {
   if (s.setor_regulado && (candidate.tags||[]).includes('enterprise')) { score += 5; uniqPush(why,'compliance/regulação'); }
   return score;
 }
-
 function evidenceScore(candidate, s, why) {
   let pts = 0;
   if (hasStrongNewsFor(candidate, s)) { pts += 24; uniqPush(why, 'evidência forte em notícia de adoção/implantação'); }
-  const evid = Math.min(3, countVendorEvidence(candidate, s)); // 0..3
+  const evid = Math.min(3, countVendorEvidence(candidate, s));
   if (evid > 0) { pts += evid === 1 ? 4 : evid === 2 ? 6 : 8; uniqPush(why, `menções públicas (${evid})`); }
   return pts;
 }
-
 function brandSignalScore(candidate, s, why) {
   let score = 0;
   const name = (candidate.name || '').toLowerCase();
@@ -317,21 +301,17 @@ function scoreERP(candidate, s) {
   score += segmentMatchScore(candidate, s, why);
   score += brandSignalScore(candidate, s, why);
 
-  // Anti-viés TOTVS em enterprise/multinacional/regulado sem evidência
   const cname = (candidate.name || '').toLowerCase();
   if ((/protheus|totvs/.test(cname)) &&
       (s.multinacional || s.setor_regulado || s.employeesReported >= 600 || s.revenueReported >= 800e6) &&
       !hasStrongNewsFor(candidate, s)) {
     score -= 12; uniqPush(why, 'sem evidência pública de TOTVS neste porte/segmento');
   }
-
-  // SMB em enterprise
   if ((/business one|business\s*central|omie|tiny/.test(cname)) &&
       (s.employeesReported >= 300 || s.revenueReported >= 800e6)) {
     score -= 25; uniqPush(why, 'mismatch de porte (SMB vs. enterprise)');
   }
 
-  // Preferência ECC x S/4 quando ambos pontuam
   const pref = inferSapCorePreference(s);
   if (pref === 'ecc' && /sap s\/?4hana/i.test(candidate.name)) { score -= 6; uniqPush(why,'indícios de SAP legado (>10 anos) favorecem ECC'); }
   if (pref === 's4'  && /sap ecc/i.test(candidate.name))       { score -= 6; uniqPush(why,'indícios de adoção recente favorecem S/4HANA'); }
@@ -362,9 +342,8 @@ function complexityIndex(s) {
   if (s.multiempresa) c += 1;
   if (s.setor_regulado) c += 2;
   if (s.cloudSaaS) c += 1;
-  return c; // 0..10
+  return c;
 }
-
 function scoreFiscal(candidate, s, erpTop1Name) {
   const why = [];
   let score = 0;
@@ -375,7 +354,6 @@ function scoreFiscal(candidate, s, erpTop1Name) {
   const usingTOTVS = /totvs|protheus|rm\b/.test(e);
   const isB1Top = /business one/.test(e);
 
-  // Exclusões por coerência
   if (/(4tax|guepardo)/i.test(nm) && !isSAPTop) {
     return { name: candidate.name, rawScore: -Infinity, why:['Excluído: solução fiscal focada em SAP e ERP estimado não é SAP'], whyShort:'excluído', pain_points: fiscalPainPoints(candidate, s, erpTop1Name), criteria: criteriaPanel(s) };
   }
@@ -383,40 +361,29 @@ function scoreFiscal(candidate, s, erpTop1Name) {
     return { name: candidate.name, rawScore: -Infinity, why:['Excluído: add-on fiscal do SAP Business One só faz sentido com SAP B1'], whyShort:'excluído', pain_points: fiscalPainPoints(candidate, s, erpTop1Name), criteria: criteriaPanel(s) };
   }
 
-  // TOTVS → Fiscal interno em #1 (externo só com evidência)
   if (usingTOTVS && /totvs.*interno/.test(nm)) { score += 26; uniqPush(why,'TOTVS costuma tratar fiscal internamente'); }
   else if (usingTOTVS) {
     const evStrong = hasStrongNewsFor({ name: candidate.name, keywords: [candidate.id] }, s);
     if (evStrong) { score += 12; uniqPush(why,'evidência de solução externa com TOTVS'); }
     else { score += 0; uniqPush(why,'sem indício de solução externa com TOTVS'); }
   }
-
-  // SAP Business One → Add-on homologado
-  if (isB1Top && /add-on.*business one/i.test(nm)) { score += 22; uniqPush(why,'B1 geralmente usa add-ons homologados para fiscal (baixo custo)'); }
-
-  // SAP Core (S/4/ECC) → suites enterprise
+  if (isB1Top && /add-on.*business one/i.test(nm)) { score += 22; uniqPush(why,'B1 geralmente usa add-ons homologados (baixo custo)'); }
   if (isSAPTop && /(thomson|mastersaf|sovos|synchro)/i.test(nm)) { score += 14; uniqPush(why,'sinergia e conectores maduros com SAP'); }
-
-  // Cloud mid (D365/NetSuite) → Avalara/Sovos sobem
   if ((e.includes('dynamics') || e.includes('netsuite')) && /(avalara|sovos|thomson|mastersaf)/i.test(nm)) {
     score += 12; uniqPush(why,'integrações fortes com ERPs cloud');
   }
 
-  // Porte/regulação
   const emp = s.employeesReported;
   if (emp >= 1500 && candidate.tier === 'enterprise') { score += 8; uniqPush(why,'porte grande/complexo'); }
   if (emp > 0 && emp < 250 && candidate.tier === 'smb') { score += 6; uniqPush(why,'adequado a SMB'); }
   if (s.setor_regulado && candidate.tier === 'enterprise') { score += 5; uniqPush(why,'aderência a requisitos regulatórios'); }
 
-  // Evidência de notícia (forte/leves)
   const evPts = evidenceScore(candidate, s, why);
   score += evPts;
   if (evPts >= 20) uniqPush(why, 'notícia específica cita a solução (alta confiabilidade)');
 
-  // Diferenciadores por fornecedor (para não ficar “sempre a mesma justificativa”)
   fiscalVendorSpecificWhy(nm, s, why);
 
-  // Desempate “variedade coerente” por complexidade
   const cx = complexityIndex(s);
   if (cx >= 6 && /(thomson|mastersaf)/i.test(nm)) score += 3;
   if (cx >= 4 && /sovos/i.test(nm)) score += 2;
@@ -446,7 +413,6 @@ function normalizeTop3(list) {
   const max = Math.max(...ranked.map(r => r.rawScore));
   const min = Math.min(...ranked.map(r => r.rawScore));
   const spread = Math.max(1, max - min);
-
   return ranked.map((x, idx) => {
     const rel = (x.rawScore - min) / spread;
     let pct = Math.round(40 + rel * 45);
@@ -459,46 +425,36 @@ function normalizeTop3(list) {
 
 /* ---------------------------- API PUBLICA ------------------------------- */
 
-// Famílias SAP: Core (S/4 + ECC) vs B1 → nunca juntas
-function dedupeSapFamilies(ranked, s) {
-  const core = ['sap s/4hana','sap ecc'];
-  const b1   = ['sap business one'];
-  const hasCore = ranked.some(x => core.includes(x.name.toLowerCase()));
-  const hasB1   = ranked.some(x => b1.includes(x.name.toLowerCase()));
-  if (hasCore && hasB1) {
-    const coreBest = ranked.filter(x => core.includes(x.name.toLowerCase()))[0];
-    const b1Best   = ranked.filter(x => b1.includes(x.name.toLowerCase()))[0];
-    const keepCore = (coreBest?.rawScore || 0) >= (b1Best?.rawScore || 0);
-    return ranked.filter(x => keepCore ? !b1.includes(x.name.toLowerCase())
-                                       : !core.includes(x.name.toLowerCase()));
-  }
-  // Dentro do Core: preferir ECC ou S/4 (nunca os dois)
-  const hasECC = ranked.find(x => x.name.toLowerCase() === 'sap ecc');
-  const hasS4  = ranked.find(x => x.name.toLowerCase() === 'sap s/4hana');
-  if (hasECC && hasS4) {
-    const pref = inferSapCorePreference(s);
-    if (pref === 'ecc') return ranked.filter(x => x.name.toLowerCase() !== 'sap s/4hana');
-    if (pref === 's4')  return ranked.filter(x => x.name.toLowerCase() !== 'sap ecc');
-    // sem preferência clara: mantém o de maior score
-    return ranked.filter(x => (hasECC.rawScore >= hasS4.rawScore) ? x.name.toLowerCase() !== 'sap s/4hana'
-                                                                  : x.name.toLowerCase() !== 'sap ecc');
-  }
-  return ranked;
+// Família SAP Core (S/4 + ECC) → mantém APENAS UM membro SEMPRE.
+function collapseSapCore(scored, s) {
+  const isS4  = (x) => x.name.toLowerCase() === 'sap s/4hana';
+  const isECC = (x) => x.name.toLowerCase() === 'sap ecc';
+
+  const s4  = scored.find(isS4);
+  const ecc = scored.find(isECC);
+  if (!s4 || !ecc) return scored;
+
+  const pref = inferSapCorePreference(s);
+  let keep = null;
+  if (pref === 's4') keep = 's4';
+  else if (pref === 'ecc') keep = 'ecc';
+  else keep = (s4.rawScore >= ecc.rawScore) ? 's4' : 'ecc';
+
+  return scored.filter(x => keep === 's4' ? !isECC(x) : !isS4(x));
 }
 
 function buildTop3(relatorio) {
   const s = deriveSignals(relatorio);
 
-  // ERP (com dedupe de famílias SAP ANTES do top-3, incluindo ECC vs S/4)
-  let erpRankRaw = ERPS.map(c => scoreERP(c, s)).sort((a,b) => b.rawScore - a.rawScore);
-  erpRankRaw = dedupeSapFamilies(erpRankRaw, s);
+  // 1) Score ERP, 2) colapsa família SAP Core (NUNCA juntos), 3) Top-3
+  let erpRankRaw = ERPS.map(c => scoreERP(c, s));
+  erpRankRaw = collapseSapCore(erpRankRaw, s);
+  erpRankRaw.sort((a,b) => b.rawScore - a.rawScore);
   const erp_top3 = normalizeTop3(erpRankRaw);
 
-  // Fiscal (depende do ERP #1)
+  // Fiscal dependente do ERP #1
   const erpTop1Name = erp_top3[0]?.name || '';
-  const fiscalRankRaw = FISCALS
-    .map(c => scoreFiscal(c, s, erpTop1Name))
-    .sort((a,b) => b.rawScore - a.rawScore);
+  const fiscalRankRaw = FISCALS.map(c => scoreFiscal(c, s, erpTop1Name)).sort((a,b) => b.rawScore - a.rawScore);
   const fiscal_top3 = normalizeTop3(fiscalRankRaw);
 
   const clean = (arr) => arr.map(x => ({
