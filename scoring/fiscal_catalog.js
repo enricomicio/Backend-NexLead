@@ -26,6 +26,11 @@ module.exports = [
     tags:['brasil','sped','multiempresa','enterprise'],
     keywords:['synchro'] },
 
+  // TOTVS Fiscal interno (entra como #1 quando ERP=TOTVS e não há evidência de externo)
+  { id:'totvs_internal', name:'Fiscal interno (TOTVS Protheus/RM)', tier:'mid',
+    tags:['totvs_internal','brasil'],
+    keywords:['totvs fiscal','protheus fiscal','rm fiscal'] },
+
   { id:'dootax', name:'Dootax', tier:'mid',
     tags:['guias','boletos','automação fiscal','pagamento de tributos','mid'],
     keywords:['dootax'] },
@@ -42,4 +47,3 @@ module.exports = [
     tags:['início','baixo volume','smb'],
     keywords:['planilha','excel'] },
 ];
-
