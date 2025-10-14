@@ -74,4 +74,3 @@ module.exports = [
     sizeHint:{}, tags:['in-house','legado'],
     keywords:['sistema próprio','in house','desenvolvimento próprio','house'] },
 ];
-
