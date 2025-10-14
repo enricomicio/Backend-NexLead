@@ -150,42 +150,6 @@ function inferTotvsPreference(s) {
   return 'protheus';
 }
 
-/* ---------------------- CRITÉRIOS & RESUMOS ----------------------------- */
-
-function criteriaPanel(s) {
-  const fmt = (n) => n ? n.toLocaleString('pt-BR') : 'não localizado';
-  return {
-    empresa: s.multinacional ? 'multinacional' : 'brasileira (sem indício externo)',
-    funcionarios: s.employeesReported ? fmt(s.employeesReported) : 'não localizado',
-    faturamento: s.revenueReported ? `≈ R$ ${fmt(s.revenueReported)}/ano` : 'não localizado',
-    multiempresa: s.multiempresa ? 'sim' : 'não observado',
-    setor_regulado: s.setor_regulado ? 'sim' : 'não'
-  };
-}
-
-function buildWhyFromNumbers(kind, name, s, breakdown, metrics) {
-  const arr = [];
-  // Evidência
-  arr.push(`menções públicas: ${metrics.evidence_hits}${metrics.strong_news ? ' (inclui notícia de adoção)' : ''}`);
-  // Porte/receita
-  const empTxt = metrics.emp ? `${metrics.emp.toLocaleString('pt-BR')} colaboradores` : 'não localizado';
-  const revTxt = metrics.rev_band || 'não localizado';
-  arr.push(`porte/fit: +${Math.round(breakdown.size_fit || 0)} (funcionários: ${empTxt}, receita: ${revTxt})`);
-  // Segmento
-  arr.push(`aderência ao segmento: +${Math.round(breakdown.segment_fit || 0)}`);
-  // Ecossistema
-  if (breakdown.brand_signals) arr.push(`sinais de ecossistema: +${Math.round(breakdown.brand_signals)}`);
-  // Sinergia (Fiscal)
-  if (kind === 'FISCAL') arr.push(`sinergia com ERP líder: +${Math.round(breakdown.synergy || 0)}`);
-  // Penalidades
-  const pen = [];
-  if (breakdown.mismatch_penalties) pen.push(`incompatibilidades: −${Math.round(breakdown.mismatch_penalties)}`);
-  if (breakdown.cost_penalties) pen.push(`custo/TCO: −${Math.round(breakdown.cost_penalties)}`);
-  if (breakdown.family_rules) pen.push(`regras de família: −${Math.round(breakdown.family_rules)}`);
-  if (pen.length) arr.push(pen.join(' | '));
-  return arr;
-}
-
 /* ----------------------------- PAIN POINTS ------------------------------ */
 
 function erpPainPoints(candidate, s) {
@@ -260,18 +224,18 @@ function segmentMatchScore(candidate, s, why) {
 
 function evidenceScore(candidate, s, why) {
   let pts = 0;
-  if (hasStrongNewsFor(candidate, s)) { pts += 24; uniqPush(why, 'evidência forte em notícia de adoção/implantação'); }
+  if (hasStrongNewsFor(candidate, s)) { pts += 24; uniqPush(why, 'há indícios públicos recentes favorecendo esta opção'); }
   const evid = Math.min(3, countVendorEvidence(candidate, s));
-  if (evid > 0) { pts += evid === 1 ? 4 : evid === 2 ? 6 : 8; uniqPush(why, `menções públicas (${evid})`); }
+  if (evid > 0) { pts += evid === 1 ? 4 : evid === 2 ? 6 : 8; }
   return pts;
 }
 
 function brandSignalScore(candidate, s, why) {
   let score = 0;
   const name = (candidate.name || '').toLowerCase();
-  if (s.hasSap && name.includes('sap')) score += 6, uniqPush(why,'sinais gerais de SAP');
-  if (s.hasTotvs && (name.includes('totvs') || name.includes('protheus'))) score += 5, uniqPush(why,'sinais gerais de TOTVS');
-  if (s.hasOracle && (name.includes('oracle') || name.includes('netsuite'))) score += 5, uniqPush(why,'sinais de Oracle/NetSuite');
+  if (s.hasSap && name.includes('sap')) score += 6, uniqPush(why,'há sinais de ecossistema SAP');
+  if (s.hasTotvs && (name.includes('totvs') || name.includes('protheus'))) score += 5, uniqPush(why,'há sinais de ecossistema TOTVS');
+  if (s.hasOracle && (name.includes('oracle') || name.includes('netsuite'))) score += 5, uniqPush(why,'há sinais de ecossistema Oracle/NetSuite');
   return score;
 }
 
@@ -279,20 +243,16 @@ function brandSignalScore(candidate, s, why) {
 
 function scoreERP(candidate, s) {
   const why = [];
-  const breakdown = { evidence:0, size_fit:0, segment_fit:0, brand_signals:0, family_rules:0, mismatch_penalties:0, cost_penalties:0 };
-  const metrics = { evidence_hits: 0, strong_news: false, emp: s.employeesReported || 0, rev_band: s.revenueReported ? (s.revenueReported < 100e6 ? '<R$100M' : s.revenueReported < 500e6 ? 'R$100–500M' : s.revenueReported < 1e9 ? 'R$500M–1B' : '≥R$1B') : null };
 
   const hf = erpHardFilter(candidate, s);
   if (hf.excluded) {
-    return { name: candidate.name, rawScore: -Infinity, breakdown, metrics, why:[`Excluído: ${hf.reason}`], whyShort:'excluído', pain_points:[], criteria: criteriaPanel(s) };
+    return { name: candidate.name, rawScore: -Infinity, why:[`Excluído: ${hf.reason}`], whyShort:'excluído', pain_points:[], criteria: panel(s), breakdown:{} };
   }
 
   let score = 0;
+  const breakdown = { evidence:0, size_fit:0, segment_fit:0, brand_signals:0, family_rules:0, mismatch_penalties:0 };
 
   const ev = evidenceScore(candidate, s, why); score += ev; breakdown.evidence += ev;
-  metrics.evidence_hits = Math.min(3, countVendorEvidence(candidate, s));
-  metrics.strong_news = hasStrongNewsFor(candidate, s);
-
   const sz = sizeMatchScore(candidate, s, why); score += sz; breakdown.size_fit += sz;
   const sg = segmentMatchScore(candidate, s, why); score += sg; breakdown.segment_fit += sg;
   const bs = brandSignalScore(candidate, s, why); score += bs; breakdown.brand_signals += bs;
@@ -314,25 +274,29 @@ function scoreERP(candidate, s) {
 
   score = Math.max(0, Math.min(100, score));
 
-  const whyArr = buildWhyFromNumbers('ERP', candidate.name, s, breakdown, metrics);
-  const whyShort = sentence([
-    metrics.strong_news ? 'notícia de adoção' : (metrics.evidence_hits ? `menções ${metrics.evidence_hits}` : 'sem menções'),
-    `fit porte +${Math.round(breakdown.size_fit||0)}`,
-    `segmento +${Math.round(breakdown.segment_fit||0)}`
-  ], 3);
-
+  // whyShort simples
+  const whyShort = sentence(why, 2);
   const pain_points = erpPainPoints(candidate, s);
-  return { name: candidate.name, rawScore: score, breakdown, metrics, why: whyArr, whyShort, pain_points, criteria: criteriaPanel(s) };
+
+  return { name: candidate.name, rawScore: score, breakdown, why, whyShort, pain_points, criteria: panel(s) };
 }
 
 /* --------------------------- FISCAL RANKING ----------------------------- */
 
+function panel(s) {
+  const fmt = (n) => n ? n.toLocaleString('pt-BR') : 'não localizado';
+  return [
+    s.multinacional ? 'multinacional' : 'brasileira',
+    s.employeesReported ? `${fmt(s.employeesReported)} colaboradores` : 'funcionários não localizados',
+    s.revenueReported ? `≈ R$ ${fmt(s.revenueReported)}/ano` : 'faturamento não localizado',
+    s.multiempresa ? 'multiempresa' : 'sem multiempresa'
+  ];
+}
+
 function scoreFiscal(candidate, s, erpTop1Name) {
   const why = [];
-  const breakdown = { evidence:0, size_fit:0, segment_fit:0, brand_signals:0, synergy:0, family_rules:0, mismatch_penalties:0, cost_penalties:0 };
-  const metrics = { evidence_hits: 0, strong_news: false, emp: s.employeesReported || 0, rev_band: s.revenueReported ? (s.revenueReported < 100e6 ? '<R$100M' : s.revenueReported < 500e6 ? 'R$100–500M' : s.revenueReported < 1e9 ? 'R$500M–1B' : '≥R$1B') : null };
-
   let score = 0;
+  const breakdown = { evidence:0, size_fit:0, segment_fit:0, brand_signals:0, synergy:0, family_rules:0, mismatch_penalties:0, cost_penalties:0 };
 
   const e = (erpTop1Name || '').toLowerCase();
   const nm = (candidate.name || '').toLowerCase();
@@ -341,58 +305,46 @@ function scoreFiscal(candidate, s, erpTop1Name) {
   const isB1Top = /business one/.test(e);
 
   if (/(4tax|guepardo)/i.test(nm) && !isSAPTop) {
-    return { name: candidate.name, rawScore: -Infinity, breakdown, metrics, why:['Excluído: solução fiscal focada em SAP e ERP estimado não é SAP'], whyShort:'excluído', pain_points: fiscalPainPoints(candidate, s, erpTop1Name), criteria: criteriaPanel(s) };
+    return { name: candidate.name, rawScore: -Infinity, why:['Excluído: solução focada em SAP e ERP estimado não é SAP'], whyShort:'excluído', pain_points: fiscalPainPoints(candidate, s, erpTop1Name), criteria: panel(s), breakdown };
   }
   if (/add-on.*business one/i.test(nm) && !isB1Top) {
-    return { name: candidate.name, rawScore: -Infinity, breakdown, metrics, why:['Excluído: add-on fiscal do SAP Business One só faz sentido com SAP B1'], whyShort:'excluído', pain_points: fiscalPainPoints(candidate, s, erpTop1Name), criteria: criteriaPanel(s) };
+    return { name: candidate.name, rawScore: -Infinity, why:['Excluído: add-on fiscal do SAP Business One só faz sentido com SAP B1'], whyShort:'excluído', pain_points: fiscalPainPoints(candidate, s, erpTop1Name), criteria: panel(s), breakdown };
   }
 
-  if (usingTOTVS && /totvs.*interno/.test(nm)) { score += 30; breakdown.family_rules += 30; }
-  else if (usingTOTVS) {
-    const evStrong = hasStrongNewsFor({ name: candidate.name, keywords: [candidate.id] }, s);
-    if (evStrong) { score += 8; breakdown.synergy += 8; }
-    else { score -= 10; breakdown.mismatch_penalties += 10; }
-  }
+  // TOTVS → fiscal interno
+  if (usingTOTVS && /totvs.*interno/.test(nm)) { score += 30; breakdown.family_rules += 30; uniqPush(why,'característica nativa do TOTVS para fiscal'); }
+  else if (usingTOTVS) { score -= 10; breakdown.mismatch_penalties += 10; uniqPush(why,'em TOTVS, fiscal costuma ser interno'); }
 
-  if (isB1Top && /add-on.*business one/i.test(nm)) { score += 24; breakdown.family_rules += 24; }
-  if (isSAPTop && /(thomson|mastersaf|sovos|synchro)/i.test(nm)) { score += 14; breakdown.synergy += 14; }
+  // B1 → add-on
+  if (isB1Top && /add-on.*business one/i.test(nm)) { score += 24; breakdown.family_rules += 24; uniqPush(why,'no B1, fiscal via add-on homologado'); }
+
+  // sinergias
+  if (isSAPTop && /(thomson|mastersaf|sovos|synchro)/i.test(nm)) { score += 14; breakdown.synergy += 14; uniqPush(why,'conectores maduros com SAP'); }
   if ((e.includes('dynamics') || e.includes('netsuite')) && /(avalara|sovos|thomson|mastersaf)/i.test(nm)) {
-    score += 12; breakdown.synergy += 12; }
+    score += 12; breakdown.synergy += 12; uniqPush(why,'boas integrações para ERPs cloud'); }
+
+  // porte/regulação
   const emp = s.employeesReported;
   if (emp >= 1500 && candidate.tier === 'enterprise') { score += 8; breakdown.size_fit += 8; }
   if (emp > 0 && emp < 250 && candidate.tier === 'smb') { score += 6; breakdown.size_fit += 6; }
   if (s.setor_regulado && candidate.tier === 'enterprise') { score += 5; breakdown.segment_fit += 5; }
 
+  // preço x porte
   if (s.revenueReported > 0 && s.revenueReported <= 150e6) {
-    if (/bpo fiscal/i.test(nm)) { score += 22; breakdown.cost_penalties -= 22; }
-    if (/(mastersaf|thomson|sovos|synchro)/i.test(nm)) { score -= 12; breakdown.cost_penalties += 12; }
+    if (/bpo fiscal/i.test(nm)) { score += 22; breakdown.cost_penalties -= 22; uniqPush(why,'melhor custo/benefício para pequeno porte'); }
+    if (/(mastersaf|thomson|sovos|synchro)/i.test(nm)) { score -= 12; breakdown.cost_penalties += 12; uniqPush(why,'solução enterprise tende a ser cara para ≤ R$150M'); }
   }
 
-  if (hasStrongNewsFor(candidate, s)) { score += 20; breakdown.evidence += 20; }
-  metrics.evidence_hits = Math.min(3, countVendorEvidence(candidate, s));
-  metrics.strong_news = hasStrongNewsFor(candidate, s);
-  if (metrics.evidence_hits > 0) breakdown.evidence += (metrics.evidence_hits === 1 ? 3 : metrics.evidence_hits === 2 ? 5 : 7);
-
-  // vendor-specific flavor (só texto)
-  const nmTxt = (candidate.name || '').toLowerCase();
-  if (/mastersaf|onesource|thomson/.test(nmTxt)) { uniqPush(why, 'cobertura profunda de SPED/Bloco K e cenários complexos'); }
-  if (/sovos/.test(nmTxt)) { uniqPush(why, 'plataforma cloud com atualização contínua de regras'); }
-  if (/synchro/.test(nmTxt)) { uniqPush(why, 'forte presença nacional com TCO competitivo'); }
-  if (/avalara/.test(nmTxt)) { uniqPush(why, 'integrações rápidas com NF-e/marketplaces (time-to-value)'); }
-  if (/guepardo/.test(nmTxt)) { uniqPush(why, 'acelerações para SAP via NTT DATA'); }
-  if (/4tax/.test(nmTxt)) { uniqPush(why, 'parceiro Seidor com custo/agilidade mid para SAP'); }
+  // evidências
+  if (hasStrongNewsFor(candidate, s)) { score += 20; breakdown.evidence += 20; uniqPush(why,'há notícia indicando adoção'); }
+  const evid = Math.min(3, countVendorEvidence(candidate, s));
+  if (evid > 0) breakdown.evidence += (evid === 1 ? 3 : evid === 2 ? 5 : 7);
 
   score = Math.max(0, Math.min(100, score));
-
-  const whyArr = buildWhyFromNumbers('FISCAL', candidate.name, s, breakdown, metrics);
-  const whyShort = sentence([
-    metrics.strong_news ? 'notícia de adoção' : (metrics.evidence_hits ? `menções ${metrics.evidence_hits}` : 'sem menções'),
-    `sinergia +${Math.round(breakdown.synergy||0)}`,
-    breakdown.cost_penalties > 0 ? `cuidado TCO −${Math.round(breakdown.cost_penalties)}` : `fit porte +${Math.round(breakdown.size_fit||0)}`
-  ], 3);
-
+  const whyShort = sentence(why, 2);
   const pain_points = fiscalPainPoints(candidate, s, erpTop1Name);
-  return { name: candidate.name, rawScore: score, breakdown, metrics, why: [...whyArr, ...why], whyShort, pain_points, criteria: criteriaPanel(s) };
+
+  return { name: candidate.name, rawScore: score, breakdown, why, whyShort, pain_points, criteria: panel(s) };
 }
 
 /* --------------------------- NORMALIZAÇÃO ------------------------------- */
@@ -415,56 +367,65 @@ function normalizeTop3(list) {
   });
 }
 
-/* --------------------------- COMPARADORES -------------------------------- */
+/* ---------------------- EXPLICAÇÕES “POR QUE NÃO” ----------------------- */
 
-function factorDeltas(upper, lower, type) {
+function makeHumanReasons(upper, lower, type) {
+  if (!upper || !lower) return '';
   const u = upper.breakdown || {}, l = lower.breakdown || {};
-  return {
-    evidence: Math.round((u.evidence||0)-(l.evidence||0)),
-    size_fit: Math.round((u.size_fit||0)-(l.size_fit||0)),
-    segment_fit: Math.round((u.segment_fit||0)-(l.segment_fit||0)),
-    brand_signals: Math.round((u.brand_signals||0)-(l.brand_signals||0)),
-    ...(type==='FISCAL' ? { synergy: Math.round((u.synergy||0)-(l.synergy||0)) } : {}),
-    cost_penalties: Math.round((l.cost_penalties||0)-(u.cost_penalties||0)),
-    mismatch_penalties: Math.round((l.mismatch_penalties||0)-(u.mismatch_penalties||0)),
-    family_rules: Math.round((l.family_rules||0)-(u.family_rules||0)),
-  };
-}
+  const reasons = [];
 
-function explainDelta(upper, lower, type) {
-  const gap = Math.max(0, Math.round((upper.rawScore||0)-(lower.rawScore||0)));
-  const leader = Math.round(upper.rawScore||0), challenger = Math.round(lower.rawScore||0);
-  const d = factorDeltas(upper, lower, type);
+  // 1) Evidência pública
+  if ((u.evidence||0) - (l.evidence||0) >= 4) {
+    reasons.push(`há sinais públicos mais fortes favorecendo ${upper.name}`);
+  }
 
-  // pegue os 2-3 maiores absolutos
-  const entries = Object.entries(d).sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])).filter(([,v])=>Math.abs(v)>=3).slice(0,3);
-  const parts = entries.map(([k,v])=>{
-    const labels = {
-      evidence:'evidência pública', size_fit:'fit de porte', segment_fit:'aderência ao segmento',
-      brand_signals:'sinais de ecossistema', synergy:'sinergia com ERP líder',
-      cost_penalties:'penalidade de custo/TCO', mismatch_penalties:'incompatibilidades', family_rules:'regras de família'
-    };
-    const sign = v>0?'+':'−';
-    return `${labels[k]} (${sign}${Math.abs(v)} p.p. pró líder)`;
-  });
-  const text = `líder ${leader} vs ${challenger} (dif. ${gap}). Principais diferenças: ${parts.length?sentence(parts,3):'combinação de pequenos fatores'}.`;
-  return { text, deltas: d };
+  // 2) Porte/complexidade
+  if ((u.size_fit||0) - (l.size_fit||0) >= 4) {
+    reasons.push(`o porte/complexidade da operação se encaixa melhor em ${upper.name}`);
+  }
+
+  // 3) Segmento
+  if ((u.segment_fit||0) - (l.segment_fit||0) >= 4) {
+    reasons.push(`a aderência ao segmento é mais consistente em ${upper.name}`);
+  }
+
+  // 4) Ecossistema/stack
+  if ((u.brand_signals||0) - (l.brand_signals||0) >= 3) {
+    reasons.push(`o ecossistema/stack atual aponta mais para ${upper.name}`);
+  }
+
+  // 5) Regras de família (SAP/TOTVS/B1)
+  if ((l.family_rules||0) - (u.family_rules||0) >= 3) {
+    reasons.push(`regras de versão/família favorecem ${upper.name} (por ex., ECC vs S/4 ou Protheus vs RM)`);
+  }
+
+  // 6) Sinergia (somente Fiscal)
+  if (type === 'FISCAL' && (u.synergy||0) - (l.synergy||0) >= 4) {
+    reasons.push(`a integração com o ERP líder é mais direta em ${upper.name}`);
+  }
+
+  // 7) Custo/TCO e “mismatch”
+  if ((l.mismatch_penalties||0) - (u.mismatch_penalties||0) >= 5) {
+    reasons.push(`este candidato tende a exigir mais ajustes/esforço do que ${upper.name}`);
+  }
+  if ((l.cost_penalties||0) - (u.cost_penalties||0) >= 5) {
+    reasons.push(`o custo/tempo de implantação tende a ser menos favorável que em ${upper.name}`);
+  }
+
+  // fallback amigável
+  if (!reasons.length) {
+    reasons.push(`no conjunto de fatores (porte, segmento e contexto público), ${upper.name} mostra encaixe mais natural`);
+  }
+
+  return `não ficou acima porque ${sentence(reasons, 3)}.`;
 }
 
 function injectWhyNot(list, type) {
   if (!list || list.length < 2) return list;
-  if (list[1]) {
-    const ex = explainDelta(list[0], list[1], type);
-    list[1].why_not_first = ex.text;
-    list[1].delta_breakdown_vs_first = ex.deltas;
-  }
+  if (list[1]) list[1].why_not_first = makeHumanReasons(list[0], list[1], type);
   if (list[2]) {
-    const ex1 = explainDelta(list[0], list[2], type);
-    const ex2 = explainDelta(list[1], list[2], type);
-    list[2].why_not_first = ex1.text;
-    list[2].why_not_second = ex2.text;
-    list[2].delta_breakdown_vs_first = ex1.deltas;
-    list[2].delta_breakdown_vs_second = ex2.deltas;
+    list[2].why_not_first = makeHumanReasons(list[0], list[2], type);
+    list[2].why_not_second = makeHumanReasons(list[1], list[2], type);
   }
   return list;
 }
@@ -473,7 +434,7 @@ function injectWhyNot(list, type) {
 
 // SAP Core (S/4 + ECC) → manter só 1
 function collapseSapCore(scored, s) {
-  const isS4  = (x) => x.name.toLowerCase() === 'sap s/4h ana' || x.name.toLowerCase() === 'sap s/4hana';
+  const isS4  = (x) => x.name.toLowerCase() === 'sap s/4hana';
   const isECC = (x) => x.name.toLowerCase() === 'sap ecc';
   const s4  = scored.find(isS4);
   const ecc = scored.find(isECC);
@@ -486,12 +447,12 @@ function collapseSapCore(scored, s) {
 // TOTVS (Protheus x RM) → manter só 1
 function collapseTotvsFamily(scored, s) {
   const isPro = (x) => x.name.toLowerCase() === 'totvs protheus';
-  const isRM  = (x) => x.name.toLowerCase() === 'totvs rm';
+  the_isRM  = (x) => x.name.toLowerCase() === 'totvs rm';
   const pro = scored.find(isPro);
-  const rm  = scored.find(isRM);
+  const rm  = scored.find(the_isRM);
   if (!pro || !rm) return scored;
   const keep = inferTotvsPreference(s) === 'rm' ? 'rm' : 'protheus';
-  return scored.filter(x => keep === 'rm' ? !isPro(x) : !isRM(x));
+  return scored.filter(x => keep === 'rm' ? !isPro(x) : !the_isRM(x));
 }
 
 function buildTop3(relatorio) {
@@ -533,13 +494,11 @@ function buildTop3(relatorio) {
     name: x.name,
     confidence_pct: x.confidence_pct,
     whyShort: x.whyShort,
-    why: x.why,                           // bullets numéricos e específicos
+    why: x.why,               // razões simples (sem pesos/labels)
     pain_points: x.pain_points,
-    criteria: x.criteria,                 // painel (empresa/func/faturamento/etc.)
+    criteria: x.criteria,
     ...(x.why_not_first ? { why_not_first: x.why_not_first } : {}),
     ...(x.why_not_second ? { why_not_second: x.why_not_second } : {}),
-    ...(x.delta_breakdown_vs_first ? { delta_breakdown_vs_first: x.delta_breakdown_vs_first } : {}),
-    ...(x.delta_breakdown_vs_second ? { delta_breakdown_vs_second: x.delta_breakdown_vs_second } : {}),
   }));
 
   return { erp_top3: clean(erp_top3), fiscal_top3: clean(fiscal_top3) };
