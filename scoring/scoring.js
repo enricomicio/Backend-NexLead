@@ -58,6 +58,12 @@ function sentence(list, max = 3) {
   if (a.length === 2) return `${a[0]} e ${a[1]}`;
   return `${a[0]}, ${a[1]} e ${a[2]}`;
 }
+function labelStrength(v, a=8, b=16) {
+  if (v <= 0) return 'nula';
+  if (v < a) return 'baixa';
+  if (v < b) return 'média';
+  return 'alta';
+}
 
 /* ----------------------------- SIGNALS ---------------------------------- */
 
@@ -337,14 +343,13 @@ function scoreERP(candidate, s) {
   score = Math.max(0, Math.min(100, score));
   why = enrichWhyRicher(why, candidate, s);
 
-  const bullets = [];
-  if (s.multiempresa && candidate.tags?.includes('multiempresa')) bullets.push('multiempresa');
-  if (s.hasAzure && candidate.tags?.includes('azure')) bullets.push('Azure');
-  if (s.manuf && candidate.tags?.includes('manufatura')) bullets.push('manufatura');
-  if (s.varejo && ((candidate.tags||[]).includes('distribuição')||(candidate.tags||[]).includes('varejo'))) bullets.push('distribuição/varejo');
-  if (s.cloudSaaS && ((candidate.tags||[]).includes('saas')||(candidate.tags||[]).includes('cloud'))) bullets.push('cloud/SaaS');
-  if (!bullets.length && s.employeesReported) bullets.push(`porte ≈ ${s.employeesReported.toLocaleString('pt-BR')}`);
-  const whyShort = sentence(bullets, 3);
+  // whyShort com descritores
+  const descriptors = [];
+  descriptors.push(`evidência ${labelStrength(breakdown.evidence,6,14)}`);
+  if (s.employeesReported) descriptors.push(`porte ${labelStrength(breakdown.size_fit,6,14)}`);
+  descriptors.push(`segmento ${labelStrength(breakdown.segment_fit,6,14)}`);
+  if (breakdown.mismatch_penalties > 0) descriptors.push('mismatch leve');
+  const whyShort = sentence(descriptors, 3);
 
   const pain_points = erpPainPoints(candidate, s);
   return { name: candidate.name, rawScore: score, breakdown, why:[...why], whyShort, pain_points, criteria: criteriaPanel(s) };
@@ -424,12 +429,12 @@ function scoreFiscal(candidate, s, erpTop1Name) {
 
   score = Math.max(0, Math.min(100, score));
 
-  const bullets = [];
-  if (e) bullets.push(`alinha com ${erpTop1Name.split(' ')[0]}`);
-  if (/totvs.*interno/i.test(nm)) bullets.push('tratado no próprio ERP');
-  if (/add-on.*business one/i.test(nm)) bullets.push('add-on homologado (B1)');
-  if (emp > 0) bullets.push(`porte ≈ ${emp.toLocaleString('pt-BR')}`);
-  const whyShort = sentence(bullets, 3);
+  // whyShort com descritores
+  const descriptors = [];
+  descriptors.push(`evidência ${labelStrength(breakdown.evidence,5,12)}`);
+  descriptors.push(`sinergia ${labelStrength(breakdown.synergy,5,12)}`);
+  if (breakdown.cost_penalties > 0) descriptors.push('cuidado com TCO');
+  const whyShort = sentence(descriptors, 3);
 
   const pain_points = fiscalPainPoints(candidate, s, erpTop1Name);
   return { name: candidate.name, rawScore: score, breakdown, why:[...why], whyShort, pain_points, criteria: criteriaPanel(s) };
@@ -457,52 +462,48 @@ function normalizeTop3(list) {
 
 /* --------------------------- COMPARADORES -------------------------------- */
 
-function explainDelta(upper, lower, type /* 'ERP' | 'FISCAL' */) {
-  if (!upper || !lower) return '';
+function topFactorDeltas(upper, lower, type) {
   const u = upper.breakdown || {}, l = lower.breakdown || {};
-  const deltas = [];
-
-  function add(reason, diff, threshold = 4) {
-    if (diff >= threshold) deltas.push({ reason, diff });
-  }
-
-  // fatores positivos
-  add('mais evidência pública', (u.evidence||0) - (l.evidence||0));
-  add('melhor encaixe de porte', (u.size_fit||0) - (l.size_fit||0));
-  add('melhor aderência ao segmento', (u.segment_fit||0) - (l.segment_fit||0));
-  add('mais sinais de marca/ecossistema', (u.brand_signals||0) - (l.brand_signals||0));
-  if (type === 'FISCAL') add('maior sinergia com o ERP líder', (u.synergy||0) - (l.synergy||0));
-
-  // penalidades (quanto MAIS no lower, pior para ele)
-  add('maior penalidade de custo/TCO', (l.cost_penalties||0) - (u.cost_penalties||0));
-  add('mais incompatibilidades (porte/família)', (l.mismatch_penalties||0) - (u.mismatch_penalties||0));
-  add('regra de família desfavorável (ex.: TOTVS/SAP)', (l.family_rules||0) - (u.family_rules||0));
-
-  deltas.sort((a,b)=>b.diff-a.diff);
-  const top = deltas.slice(0,2).map(d=>d.reason);
-
-  if (!top.length) {
-    // fallback: diferença numérica clara
-    const gap = Math.max(0, (upper.rawScore||0) - (lower.rawScore||0));
-    if (gap >= 6) return `ficou abaixo por soma de fatores (diferença de score ≈ ${gap}).`;
-    return '';
-  }
-  return `ficou abaixo por ${sentence(top, 2)}.`;
+  const rows = [
+    ['evidência pública','evidence', (u.evidence||0)-(l.evidence||0), true],
+    ['porte/receita (fit)','size_fit', (u.size_fit||0)-(l.size_fit||0), true],
+    ['aderência ao segmento','segment_fit', (u.segment_fit||0)-(l.segment_fit||0), true],
+    ['sinais de ecossistema','brand_signals', (u.brand_signals||0)-(l.brand_signals||0), true],
+    ['sinergia com ERP líder','synergy', (u.synergy||0)-(l.synergy||0), type==='FISCAL'],
+    ['penalidade de custo/TCO','cost_penalties', (l.cost_penalties||0)-(u.cost_penalties||0), true],
+    ['incompatibilidades (porte/família)','mismatch_penalties', (l.mismatch_penalties||0)-(u.mismatch_penalties||0), true],
+    ['regras de família (SAP/TOTVS/B1)','family_rules', (l.family_rules||0)-(u.family_rules||0), true],
+  ].filter(r => r[3]);
+  rows.sort((a,b)=>Math.abs(b[2])-Math.abs(a[2]));
+  return rows.slice(0,3).filter(r=>Math.abs(r[2])>=3); // só fatores relevantes
 }
 
-function injectWhyNot(list, type /* 'ERP' | 'FISCAL' */) {
+function explainDelta(upper, lower, type) {
+  if (!upper || !lower) return { text:'', breakdown:{} };
+  const gap = Math.max(0, Math.round((upper.rawScore||0)-(lower.rawScore||0)));
+  const leader = Math.round(upper.rawScore||0), challenger = Math.round(lower.rawScore||0);
+  const top = topFactorDeltas(upper, lower, type);
+  const parts = top.map(([label, key, diff]) => `${label} (+${Math.abs(Math.round(diff))} p.p. pró líder)`);
+  const text = `ficou abaixo porque o líder tem score ${leader} vs ${challenger} (diferença ${gap}). Principais fatores: ${parts.length?sentence(parts,3):'combinação de pequenos fatores'}.`;
+  const obj = {};
+  for (const [,key,diff] of top) obj[key] = Math.round(diff);
+  return { text, breakdown: obj, gap, leader, challenger };
+}
+
+function injectWhyNot(list, type) {
   if (!list || list.length < 2) return list;
-  // 2º vs 1º
   if (list[1]) {
-    const msg = explainDelta(list[0], list[1], type);
-    if (msg) list[1].why_not_first = msg;
+    const ex = explainDelta(list[0], list[1], type);
+    list[1].why_not_first = ex.text;
+    list[1].delta_breakdown_vs_first = ex.breakdown;
   }
-  // 3º vs 1º e 2º
   if (list[2]) {
-    const msg1 = explainDelta(list[0], list[2], type);
-    const msg2 = explainDelta(list[1], list[2], type);
-    if (msg1) list[2].why_not_first = msg1;
-    if (msg2) list[2].why_not_second = msg2;
+    const ex1 = explainDelta(list[0], list[2], type);
+    const ex2 = explainDelta(list[1], list[2], type);
+    list[2].why_not_first = ex1.text;
+    list[2].why_not_second = ex2.text;
+    list[2].delta_breakdown_vs_first = ex1.breakdown;
+    list[2].delta_breakdown_vs_second = ex2.breakdown;
   }
   return list;
 }
@@ -540,7 +541,8 @@ function buildTop3(relatorio) {
   erpRankRaw = collapseSapCore(erpRankRaw, s);
   erpRankRaw = collapseTotvsFamily(erpRankRaw, s);
   erpRankRaw.sort((a,b) => b.rawScore - a.rawScore);
-  const erp_top3 = normalizeTop3(erpRankRaw);
+  let erp_top3 = normalizeTop3(erpRankRaw);
+  erp_top3 = injectWhyNot(erp_top3, 'ERP');
 
   // Fiscal: injeta candidato "TOTVS – Fiscal interno" quando ERP #1 for TOTVS
   const erpTop1Name = erp_top3[0]?.name || '';
@@ -563,11 +565,8 @@ function buildTop3(relatorio) {
   }
 
   const fiscalRankRaw = fiscals.map(c => scoreFiscal(c, s, erpTop1Name)).sort((a,b) => b.rawScore - a.rawScore);
-  const fiscal_top3 = normalizeTop3(fiscalRankRaw);
-
-  // explicar por que 2º/3º não ficaram acima quando as razões parecem parecidas
-  injectWhyNot(erp_top3, 'ERP');
-  injectWhyNot(fiscal_top3, 'FISCAL');
+  let fiscal_top3 = normalizeTop3(fiscalRankRaw);
+  fiscal_top3 = injectWhyNot(fiscal_top3, 'FISCAL');
 
   const clean = (arr) => arr.map(x => ({
     name: x.name,
@@ -577,7 +576,9 @@ function buildTop3(relatorio) {
     pain_points: x.pain_points,
     criteria: x.criteria,
     ...(x.why_not_first ? { why_not_first: x.why_not_first } : {}),
-    ...(x.why_not_second ? { why_not_second: x.why_not_second } : {})
+    ...(x.why_not_second ? { why_not_second: x.why_not_second } : {}),
+    ...(x.delta_breakdown_vs_first ? { delta_breakdown_vs_first: x.delta_breakdown_vs_first } : {}),
+    ...(x.delta_breakdown_vs_second ? { delta_breakdown_vs_second: x.delta_breakdown_vs_second } : {}),
   }));
 
   return { erp_top3: clean(erp_top3), fiscal_top3: clean(fiscal_top3) };
