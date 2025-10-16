@@ -143,9 +143,19 @@ Você **PODE** usar web_search sempre que precisar de informação externa e dev
   - **Inclua CTA** claro para uma conversa de 20 minutos **esta semana**.
 - **Compelling**: 1–2 frases orientadas a ROI/risco/eficiência/prazo regulatório, conectadas às notícias/dor/faturamento, que juntas se transformem no Compelling para investimento em TI.
 - **gatilhocomercial**: 1–2 frases com time-to-value/urgência (janela regulatória, pico sazonal, corte de custos)que resultem em um gatilho comercial poderoso para instigar um possível investimento em tecnologia.
-- **organogramaclevel**: preencha nomes quando houver fonte; caso contrário deixe vazio, mas **tente** ao menos o CEO/CFO.
-  - Mantenha a chave "Cargo" **exatamente** com maiúscula (conforme o schema).
-- **powermap**: 3 itens: Decisor, Influenciador, Barreira. Use nomes reais quando possível com **justificativa** breve (fonte/indício). Se não houver, deixe nomes vazios mas mantenha as classificações.
+
+### Organograma e PowerMap — regras específicas
+- **Fonte prioritária** (nesta ordem): 1) **LinkedIn** (página da empresa e perfis), 2) **site institucional** (páginas “Equipe”, “Liderança”), 3) **notícias confiáveis** dos **últimos 24 meses**, 4) web geral.
+- **Evitar cargos juniores**: não use "analista", "assistente", "estagiário", "trainee", "junior" (ou equivalentes).
+- **Preferir o cargo de maior senioridade por área**:
+  - **Direção**: CEO/Presidente/General Manager (se faltar, country manager com longa tenure).
+  - **Financeiro**: CFO/VP Finance/Finance Director (se faltar, Controller/Gerente Financeiro).
+  - **Tecnologia**: CIO/CTO/VP de TI (se faltar, Head/Director de TI).
+  - **Operações**: COO/VP/Director de Operações (se faltar, Supply/Logistics/Plant Ops sênior).
+- **Preenchimento cruzado** quando faltar nomes:
+  - Se o **powermap** estiver vazio, **derivar**: Decisor = CEO; Influenciador = CFO ou CIO; Barreira = COO/Compras/Legal.
+  - Se o **organograma** estiver vazio, **aproveitar** nomes do powermap por cargo (CEO→CEO etc.).
+- Sempre manter o **schema** pedido. Use nomes reais quando houver fonte; se não houver, deixe vazio.
 
 ### Como buscar (sugestões)
 - Site institucional: "sobre", "quem somos", rodapé, "política de privacidade", "contato".
@@ -215,7 +225,12 @@ Você completa um **JSON existente**. Use **web_search** e preencha **todos** os
 - E-mails (TI/Financeiro): 120–180 palavras, personalizados com empresa/segmento/notícias/Compelling/dor, CTA de 20 minutos, e sem esquecer que este e-mail deve ser um e-mail de geração de demanda, em que o foco é conseguir 20 minutos da empresa em questão, para que o usuário deste PROMT possa apresentar sua empresa.
 - "investimentoemti": benchmark setorial; se ausente, **2% do faturamento em R$** (se faturamento estiver em USD, **converta com 5,0 BRL/USD**, explique e seja conservador).
 - ERP/fiscal: escolha provável com **critério** e justificativa clara do motivo dessas soluções serem plausíveis para essa empresa.
-- Para factuais sem fonte mesmo após buscar, use "em verificação". Para estimáveis, **preencha** com critério explícito.
+
+### Organograma e PowerMap — reforço
+- **Fontes por prioridade**: 1) **LinkedIn**, 2) **site institucional**, 3) **notícias confiáveis (≤24m)**, 4) web geral.
+- **Somente cargos seniores** (CEO/Presidente; CFO/Finance Director/Controller sênior; CIO/CTO/Head de TI; COO/Operations Director).
+- Se nomes faltarem no **powermap**, derive de **organogramaclevel**: Decisor=CEO; Influenciador=CFO/CIO; Barreira=COO/Compras/Legal (explique na justificativa: "derivado do organograma").
+- Se faltar no **organograma**, aproveite nomes do **powermap** por cargo equivalente.
 
 ⚠️ Saída: **apenas** o JSON final, sem markdown, começando em "{" e terminando em "}".
 `.trim();
@@ -238,6 +253,118 @@ Lembre-se de:
 
 Saída: **somente** o JSON final.
 `.trim();
+}
+
+/* ======================= ENRIQUECIMENTO ORG/POWERMAP =======================
+   - Apenas pós-processa os campos organizacionais, SEM alterar o restante.
+   - Usa regras de prioridade de senioridade e preenche um a partir do outro.
+=============================================================================*/
+
+const JUNIOR_BLOCK = /\b(estagi|trainee|j[uú]nior|junior|assistente|analista|intern)\b/i;
+const CEO_RX  = /\b(ceo|chief executive|presidente|general manager|country manager)\b/i;
+const CFO_RX  = /\b(cfo|chief financial|vp finance|finance director|diretor financeiro|gerente financeiro|controller)\b/i;
+const CIO_RX  = /\b(cio|chief information|cto|chief technology|it director|director of it|head of it|ti)\b/i;
+const COO_RX  = /\b(coo|chief operations?|vp operations?|diretor de opera[cç][oõ]es|operations director|supply|log[íi]stica|plant|manufatura|opera[cç][oõ]es)\b/i;
+
+function normStr(s) { return String(s || "").trim(); }
+function isSeniorTitle(title, rx) {
+  const t = normStr(title).toLowerCase();
+  if (!t || JUNIOR_BLOCK.test(t)) return false;
+  return rx.test(t);
+}
+function pickBestByArea(candidates, rx) {
+  // Prefer explicit senior titles; otherwise first acceptable non-junior
+  let best = candidates.find(c => isSeniorTitle(c.cargo, rx));
+  if (best) return best;
+  return candidates.find(c => c.nome && c.nome.trim() && !JUNIOR_BLOCK.test(c.cargo || ""));
+}
+function arrayOrEmpty(x) { return Array.isArray(x) ? x : []; }
+function clone(obj) { return JSON.parse(JSON.stringify(obj || {})); }
+
+function enrichOrgPowermapPriority(objIn) {
+  const obj = clone(objIn);
+
+  const org = arrayOrEmpty(obj.organogramaclevel).map(x => ({
+    nome: normStr(x?.nome), Cargo: x?.Cargo
+  }));
+  const pwr = arrayOrEmpty(obj.powermap).map(x => ({
+    nome: normStr(x?.nome), cargo: normStr(x?.cargo), classificacao: x?.classificacao, justificativa: normStr(x?.justificativa)
+  }));
+
+  // 1) TENTAR PREENCHER ORGANOGRAMA A PARTIR DO POWERMAP (quando organograma vier vazio)
+  function setOrgIfEmpty(role, rx) {
+    const slot = org.find(o => (o.Cargo || "").toUpperCase() === role);
+    if (!slot) return;
+    if (slot.nome) return;
+    const cand = pickBestByArea(pwr, rx);
+    if (cand && cand.nome) {
+      slot.nome = cand.nome;
+    }
+  }
+  setOrgIfEmpty("CEO", CEO_RX);
+  setOrgIfEmpty("CFO", CFO_RX);
+  setOrgIfEmpty("CTO", CIO_RX);
+  setOrgIfEmpty("COO", COO_RX);
+
+  // 2) TENTAR PREENCHER POWERMAP A PARTIR DO ORGANOGRAMA (quando powermap vier vazio ou fraco)
+  function setPwrIfEmpty(classificacao, fromOrgRole, rx, defaultJust) {
+    let slot = pwr.find(p => (p.classificacao || "").toLowerCase() === classificacao.toLowerCase());
+    if (!slot) {
+      slot = { nome: "", cargo: "", classificacao, justificativa: "" };
+      pwr.push(slot);
+    }
+    if (slot.nome) return;
+
+    // candidato por cargo esperado
+    const byRole = org.find(o => (o.Cargo || "").toUpperCase() === fromOrgRole && o.nome);
+    if (byRole && byRole.nome) {
+      slot.nome = byRole.nome;
+      slot.cargo = fromOrgRole;
+      slot.justificativa = defaultJust;
+      return;
+    }
+
+    // fallback por regex na lista de org (ex.: CTO preencher Influenciador)
+    const alt = org.find(o => o.nome && isSeniorTitle(o.Cargo || "", rx));
+    if (alt) {
+      slot.nome = alt.nome;
+      slot.cargo = alt.Cargo || "";
+      slot.justificativa = defaultJust;
+    }
+  }
+
+  // Decisor ← CEO
+  setPwrIfEmpty("Decisor", "CEO", CEO_RX, "Derivado do organograma: CEO geralmente é o decisor final.");
+  // Influenciador ← CFO (fallback CIO/CTO)
+  let influAdded = false;
+  const inflSlot = pwr.find(p => (p.classificacao || "").toLowerCase() === "influenciador");
+  if (!inflSlot || !inflSlot.nome) {
+    setPwrIfEmpty("Influenciador", "CFO", CFO_RX, "Derivado do organograma: área financeira influencia decisão.");
+    influAdded = true;
+  }
+  if ((!inflSlot || !inflSlot.nome) && influAdded) {
+    setPwrIfEmpty("Influenciador", "CTO", CIO_RX, "Derivado do organograma: liderança de TI influencia decisão.");
+  }
+
+  // Barreira ← COO (fallback compras/jurídico se existir no powermap)
+  setPwrIfEmpty("Barreira", "COO", COO_RX, "Derivado do organograma: operações costuma impor restrições (processos, prazos).");
+
+  // 3) FILTRAR RÓTULOS MUITO JUNIORES NOS DOIS BLOCOS (não remove nome se já confirmado como CEO/CFO/CTO/COO)
+  org.forEach(o => {
+    if (o && o.nome && JUNIOR_BLOCK.test(o.Cargo || "")) {
+      // não apagar nome se cargo do schema está fixo (CEO/CFO/CTO/COO). Mantemos.
+    }
+  });
+  pwr.forEach(p => {
+    if (p && p.nome && JUNIOR_BLOCK.test(p.cargo || "")) {
+      // mantém nome, mas limpa cargo textual muito junior para não poluir
+      p.cargo = (p.classificacao || "");
+    }
+  });
+
+  obj.organogramaclevel = org;
+  obj.powermap = pwr;
+  return obj;
 }
 
 // ===== ROTA =====
@@ -308,6 +435,13 @@ app.post("/generate", async (req, res) => {
     }
 
     if (!missingOrWeak.length) {
+      // >>> NOVO: enriquecer Organograma/PowerMap antes de calcular ranking
+      try {
+        obj1 = enrichOrgPowermapPriority(obj1);
+      } catch (e) {
+        console.log("[org/powermap] enrich erro passo1:", e?.message || e);
+      }
+
       // >>> NOVO: top3 antes de retornar
       try {
         const { erp_top3, fiscal_top3 } = buildTop3(obj1);
@@ -366,7 +500,15 @@ app.post("/generate", async (req, res) => {
       }
     }
 
-    const finalObj = { ...obj1, ...(obj2 || {}) };
+    const finalObjPre = { ...obj1, ...(obj2 || {}) };
+
+    // >>> NOVO: enriquecer Organograma/PowerMap antes de calcular ranking
+    let finalObj = finalObjPre;
+    try {
+      finalObj = enrichOrgPowermapPriority(finalObjPre);
+    } catch (e) {
+      console.log('[org/powermap] enrich erro passo2:', e?.message || e);
+    }
 
     // >>> NOVO: calcula e anexa Top 3 de ERP e Fiscal
     try {
