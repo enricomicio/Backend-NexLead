@@ -102,6 +102,151 @@ async function callOAIWithMaxToolCalls(oaiReq, maxToolCalls) {
   }
 }
 
+// ====== INÍCIO: Utils EXCLUSIVOS para Organograma/PowerMap (LinkedIn-only) ======
+function normalizeCompanyName(s = "") {
+  return String(s)
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/\b(ltda|s\/?a|sa|holdings?)\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function inferRoleFromTitle(title = "", hasCEO = false) {
+  const t = String(title).toLowerCase();
+  const isCEO = /\b(ceo|president|diretor executivo)\b/.test(t);
+  const isCFO = /\b(cfo|diretor financeiro|vp finance)\b/.test(t);
+  const isIT  = /\b(cio|cto|head of it|it director|gerente de ti|coordenador de ti)\b/.test(t);
+  const isBlocker = /\b(procurement|compras|sourcing|legal|compliance|security)\b/.test(t);
+
+  if (isCEO) return "Decisor";
+  if (isCFO) return hasCEO ? "Influenciador" : "Decisor";
+  if (isIT)  return "Influenciador";
+  if (isBlocker) return "Barreira";
+  return "Influenciador";
+}
+
+function buildOrganogramaCLevelFromPeople(people = []) {
+  const pickFrom = (list, regex) => {
+    const idx = list.findIndex(p => regex.test((p.title || "").toLowerCase()));
+    if (idx >= 0) {
+      const p = list[idx];
+      list.splice(idx, 1);
+      return p.name || "";
+    }
+    return "";
+  };
+
+  const tmp = [...people];
+  const CEO = pickFrom(tmp, /\b(ceo|president|diretor executivo)\b/);
+  const CFO = pickFrom(tmp, /\b(cfo|diretor financeiro|vp finance)\b/);
+  const CTO = pickFrom(tmp, /\b(cto|chief technology|diretor de tecnologia|head of technology)\b/);
+  const COO = pickFrom(tmp, /\b(coo|chief operating|diretor de operacoes)\b/);
+
+  // Mantém exatamente o schema/campos que seu app já consome
+  return [
+    { nome: CEO, Cargo: "CEO" },
+    { nome: CFO, Cargo: "CFO" },
+    { nome: CTO, Cargo: "CTO" },
+    { nome: COO, Cargo: "COO" }
+  ];
+}
+
+async function fetchLinkedInPeople(openaiClient, companyDomain, companyName) {
+  const normTarget = normalizeCompanyName(companyName || companyDomain || "");
+
+  const system = `
+Você retornará APENAS um JSON válido com até 4 pessoas da empresa alvo.
+Critérios obrigatórios para cada pessoa:
+- "name": nome completo
+- "title": cargo atual (precisa ser coordenador/manager/head/director/VP/C-level)
+- "company": empresa atual no perfil LinkedIn
+- "profileUrl": URL do perfil LinkedIn (página pública)
+Regras:
+- Somente perfis com empresa ATUAL que case com a empresa alvo (normalizada).
+- Excluir consultores/agências/terceiros.
+- Priorizar: CEO, CFO, CIO/CTO, Directors/Heads/Managers (>= coordenador).
+- Máximo 4 pessoas.
+Saída: {"people":[{...}]} — sem texto fora do JSON.`.trim();
+
+  const user = `
+Empresa alvo (para normalização): "${companyName || companyDomain}"
+Empresa alvo (normalizada): "${normTarget}"
+Tarefa: encontrar até 4 perfis do LinkedIn (públicos) que hoje trabalham na empresa alvo (>= coordenador), com URL do perfil.
+Campos por pessoa: name, title, company, profileUrl.
+Saída: APENAS JSON {"people":[...]}.
+`.trim();
+
+  const req = {
+    model: MODEL,
+    tools: USE_WEB ? [{ type: "web_search" }] : [],
+    tool_choice: "auto",
+    input: [
+      { role: "system", content: system },
+      { role: "user", content: user }
+    ],
+    temperature: 0,
+    max_output_tokens: 1200
+  };
+
+  const resp = await openaiClient.responses.create(req);
+  const raw = resp.output_text || "";
+  const data = sanitizeAndParse(raw);
+  const arr = Array.isArray(data?.people) ? data.people : [];
+
+  // Filtro final defensivo + limite 4
+  const out = arr
+    .filter(p =>
+      p &&
+      p.profileUrl && /linkedin\.com\/in\//i.test(p.profileUrl) &&
+      p.title && /\b(ceo|cfo|cio|cto|chief|president|vice president|vp|director|diretor|head|manager|gerente|coordenador|coordinator)\b/i.test(p.title) &&
+      normalizeCompanyName(p.company || "") === normTarget
+    )
+    .slice(0, 4);
+
+  return out;
+}
+
+async function rebuildOrgAndPowerMapFromLinkedIn(openaiClient, finalObj, site) {
+  try {
+    const companyName = finalObj?.nomedaempresa || finalObj?.company?.name || "";
+    const domain = site || finalObj?.site || "";
+    const people = await fetchLinkedInPeople(openaiClient, domain, companyName);
+
+    // Se não achou nada confiável, não altera os campos existentes (não quebra nada)
+    if (!people || people.length === 0) return finalObj;
+
+    // ORGANOGRAMA (mantém exatamente o schema esperado pelo app)
+    const organograma = buildOrganogramaCLevelFromPeople([...people]);
+
+    // POWERMAP (3 itens: Decisor, Influenciador, Barreira)
+    const hasCEO = people.some(p => /\b(ceo|president|diretor executivo)\b/i.test(p.title || ""));
+    const pmNodes = people.map(p => ({
+      nome: p.name || "",
+      cargo: p.title || "",
+      classificacao: inferRoleFromTitle(p.title || "", hasCEO),
+      justificativa: "Fonte: LinkedIn (perfil público)"
+    }));
+
+    const pickBy = (cls) => pmNodes.find(n => n.classificacao === cls) || { nome: "", cargo: "", classificacao: cls, justificativa: "" };
+    const powermapOut = [
+      pickBy("Decisor"),
+      pickBy("Influenciador"),
+      pickBy("Barreira")
+    ];
+
+    finalObj.organogramaclevel = organograma;
+    finalObj.powermap = powermapOut;
+
+    return finalObj;
+  } catch (e) {
+    console.log("[org/powermap] falha na reconstrução via LinkedIn:", e?.message || e);
+    return finalObj; // em erro, preserva original
+  }
+}
+// ====== FIM: Utils EXCLUSIVOS para Organograma/PowerMap ======
+
+
 // ===== PROMPTS =====
 function buildSystemMsg(site) {
   return `
@@ -157,7 +302,7 @@ Você **PODE** usar web_search sempre que precisar de informação externa e dev
 ### Regras de saída
 - **Saída: SOMENTE o JSON final** (comece em "{" e termine em "}").
 - **Nunca** escreva “não encontrado”. Para factuais sem fonte após pesquisar, use "em verificação". Para estimáveis, **estime** com critério.
-- Preencha **todos** os campos; evite deixar strings vazias se houver base para estimar.
+- Preencha **todos** os campos; evite deixar strings vazios se houver base para estimar.
 `.trim();
 }
 
@@ -278,7 +423,7 @@ app.post("/generate", async (req, res) => {
         model: MODEL,
         input: [
           { role: "system", content: "Converta o conteúdo em UM ÚNICO objeto JSON válido. Preserve chaves/valores. Sem markdown." },
-          { role: "user", content: raw1 }
+        { role: "user", content: raw1 }
         ],
         text: { format: { type: "json_object" } },
         temperature: 0,
@@ -316,6 +461,14 @@ app.post("/generate", async (req, res) => {
       } catch (e) {
         console.log("[scoring] erro:", e?.message || e);
       }
+
+      // >>> NOVO: reconstrução EXCLUSIVA de organograma/powermap via LinkedIn
+      try {
+        await rebuildOrgAndPowerMapFromLinkedIn(openai, obj1, site);
+      } catch (e) {
+        console.log("[/generate] aviso (early): falha ao reconstruir org/powermap:", e?.message || e);
+      }
+
       return res.json(obj1);
     }
 
@@ -368,13 +521,20 @@ app.post("/generate", async (req, res) => {
 
     const finalObj = { ...obj1, ...(obj2 || {}) };
 
-    // >>> NOVO: calcula e anexa Top 3 de ERP e Fiscal
+    // >>> NOVO: calcula e anexa Top 3 de ERP e Fiscal (inalterado)
     try {
       const { erp_top3, fiscal_top3 } = buildTop3(finalObj);
       finalObj.erp_top3 = erp_top3;
       finalObj.fiscal_top3 = fiscal_top3;
     } catch (e) {
       console.log('[scoring] falhou ao gerar top3:', e?.message || e);
+    }
+
+    // >>> NOVO: reconstrução EXCLUSIVA de organograma/powermap via LinkedIn
+    try {
+      await rebuildOrgAndPowerMapFromLinkedIn(openai, finalObj, site);
+    } catch (e) {
+      console.log("[/generate] aviso: falha ao reconstruir org/powermap:", e?.message || e);
     }
 
     return res.json(finalObj);
