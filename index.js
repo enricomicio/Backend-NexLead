@@ -112,6 +112,30 @@ function normalizeCompanyName(s = "") {
     .trim();
 }
 
+// Similaridade de nomes de empresa (mais tolerante que igualdade exata)
+function companyNamesSimilar(a = "", b = "") {
+  const A = normalizeCompanyName(a).split(/\s+/).filter(Boolean);
+  const B = normalizeCompanyName(b).split(/\s+/).filter(Boolean);
+  if (!A.length || !B.length) return false;
+
+  // remove tokens pouco informativos
+  const stop = new Set([
+    "grupo","group","industria","industries","alimentos","foods","food",
+    "comercio","commerce","holdings","holding","brasil","brazil"
+  ]);
+  const AA = A.filter(t => !stop.has(t));
+  const BB = B.filter(t => !stop.has(t));
+  if (!AA.length || !BB.length) return false;
+
+  const setB = new Set(BB);
+  let hits = 0;
+  for (const t of AA) if (setB.has(t)) hits++;
+  const recallA = hits / AA.length;
+  const recallB = hits / BB.length;
+
+  return (recallA >= 0.5 && recallB >= 0.5) || normalizeCompanyName(a) === normalizeCompanyName(b);
+}
+
 function inferRoleFromTitle(title = "", hasCEO = false) {
   const t = String(title).toLowerCase();
   const isCEO = /\b(ceo|president|diretor executivo)\b/.test(t);
@@ -152,9 +176,23 @@ function buildOrganogramaCLevelFromPeople(people = []) {
   ];
 }
 
-async function fetchLinkedInPeople(openaiClient, companyDomain, companyName) {
-  const normTarget = normalizeCompanyName(companyName || companyDomain || "");
+// Link do LinkedIn People a partir do domínio/nome (para o botão no app)
+function inferLinkedinPeopleUrlFromDomainOrName(domain, companyName) {
+  const host = String(domain || "").toLowerCase().replace(/^https?:\/\//,'').split('/')[0] || "";
+  const base = host
+    .replace(/^www\./,'')
+    .replace(/\..*$/,'') // corta .com.br etc
+    .replace(/[^a-z0-9-]+/g,'-')
+    .replace(/^-+|-+$/g,'');
+  const slug = base || (companyName || "")
+    .toLowerCase()
+    .replace(/\s+/g,'-')
+    .replace(/[^a-z0-9-]/g,'');
+  return slug ? `https://www.linkedin.com/company/${slug}/people/` : null;
+}
 
+// Busca até 4 perfis públicos (>= coordenador), com URL do LinkedIn e empresa atual batendo (similaridade)
+async function fetchLinkedInPeople(openaiClient, companyDomain, companyName) {
   const system = `
 Você retornará APENAS um JSON válido com até 4 pessoas da empresa alvo.
 Critérios obrigatórios para cada pessoa:
@@ -170,8 +208,7 @@ Regras:
 Saída: {"people":[{...}]} — sem texto fora do JSON.`.trim();
 
   const user = `
-Empresa alvo (para normalização): "${companyName || companyDomain}"
-Empresa alvo (normalizada): "${normTarget}"
+Empresa alvo: "${companyName || companyDomain}"
 Tarefa: encontrar até 4 perfis do LinkedIn (públicos) que hoje trabalham na empresa alvo (>= coordenador), com URL do perfil.
 Campos por pessoa: name, title, company, profileUrl.
 Saída: APENAS JSON {"people":[...]}.
@@ -200,9 +237,15 @@ Saída: APENAS JSON {"people":[...]}.
       p &&
       p.profileUrl && /linkedin\.com\/in\//i.test(p.profileUrl) &&
       p.title && /\b(ceo|cfo|cio|cto|chief|president|vice president|vp|director|diretor|head|manager|gerente|coordenador|coordinator)\b/i.test(p.title) &&
-      normalizeCompanyName(p.company || "") === normTarget
+      companyNamesSimilar(p.company || "", companyName || companyDomain)
     )
     .slice(0, 4);
+
+  console.log(`[linkedin] candidatos recebidos: ${arr.length}`);
+  console.log(`[linkedin] aprovados após filtro: ${out.length}`);
+  if (arr.length && !out.length) {
+    console.log("[linkedin] exemplos rejeitados:", arr.slice(0,3));
+  }
 
   return out;
 }
@@ -216,16 +259,23 @@ async function rebuildOrgAndPowerMapFromLinkedIn(openaiClient, finalObj, site) {
     // Se não achou nada confiável, não altera os campos existentes (não quebra nada)
     if (!people || people.length === 0) return finalObj;
 
+    // Adiciona link "People" (não interfere se o app não usar)
+    const peopleUrl = inferLinkedinPeopleUrlFromDomainOrName(domain, companyName);
+    if (peopleUrl) {
+      finalObj.company = finalObj.company || {};
+      finalObj.company.linkedinPeopleUrl = peopleUrl;
+    }
+
     // ORGANOGRAMA (mantém exatamente o schema esperado pelo app)
     const organograma = buildOrganogramaCLevelFromPeople([...people]);
 
-    // POWERMAP (3 itens: Decisor, Influenciador, Barreira)
+    // POWERMAP (3 itens: Decisor, Influenciador, Barreira) + fonte explícita
     const hasCEO = people.some(p => /\b(ceo|president|diretor executivo)\b/i.test(p.title || ""));
     const pmNodes = people.map(p => ({
       nome: p.name || "",
       cargo: p.title || "",
       classificacao: inferRoleFromTitle(p.title || "", hasCEO),
-      justificativa: "Fonte: LinkedIn (perfil público)"
+      justificativa: `Fonte: LinkedIn (${p.profileUrl})`
     }));
 
     const pickBy = (cls) => pmNodes.find(n => n.classificacao === cls) || { nome: "", cargo: "", classificacao: cls, justificativa: "" };
@@ -237,6 +287,9 @@ async function rebuildOrgAndPowerMapFromLinkedIn(openaiClient, finalObj, site) {
 
     finalObj.organogramaclevel = organograma;
     finalObj.powermap = powermapOut;
+
+    console.log("[org/powermap] organograma:", JSON.stringify(organograma));
+    console.log("[org/powermap] powermap:", JSON.stringify(pmNodes));
 
     return finalObj;
   } catch (e) {
@@ -268,7 +321,7 @@ Você **PODE** usar web_search sempre que precisar de informação externa e dev
   - Se a fonte estiver em **USD**, retorne **ambos**: "US$ X (AAAA) ≈ R$ Y – câmbio 5,0 BRL/USD – fonte: ...".
   - Se **não** houver fonte direta, **estime** com critério explícito (receita/funcionário do setor × funcionários; comparação com pares; faixas de imprensa).
 - **erpatualouprovavel**: escolha entre { SAP S/4HANA, SAP ECC, SAP Business One, Oracle NetSuite, TOTVS Protheus, Senior, Sankhya, Omie, desenvolvimento próprio, outro ERP de nicho } com base em porte/segmento/notícias/ecossistema. Explique em **justificativaERP** de forma sucinta e factual.
-- **solucaofiscalouprovavel**: escolha entre { Thomson Reuters, Sovos, Solutio, Avalara, Guepardo, 4Tax, BPO fiscal, planilhas/house } com critério do motivo desta solução fiscal ser selecionada ou estimada (não esquecer de colocar o nome da solução fiscal),  em **criteriofiscal** (porte/ERP/segmento/custo/notícias).
+- **solucaofiscalouprovavel**: escolha entre { Thomson Reuters, Sovos, Solutio, Avalara, Guepardo, 4Tax, BPO fiscal, planilhas/house } com critério do motivo dessa solução fiscal ser selecionada ou estimada (não esquecer de colocar o nome da solução fiscal),  em **criteriofiscal** (porte/ERP/segmento/custo/notícias).
 - **principaldordonegocio**: 1–2 frases sobre dores relevantes (ex.: eficiência operacional, compliance, escalabilidade, SLAs, omnichannel, prazos regulatórios).
 - **investimentoemti**: se houver benchmark setorial, use-o (cite o critério).
   - Caso contrário, **2% do faturamento** (em **R$**). Se o faturamento estiver em USD, **converta** primeiro usando **câmbio 5,0 BRL/USD** e explique: "Critério: 2% de R$ {faturamento convertido}".
@@ -423,7 +476,7 @@ app.post("/generate", async (req, res) => {
         model: MODEL,
         input: [
           { role: "system", content: "Converta o conteúdo em UM ÚNICO objeto JSON válido. Preserve chaves/valores. Sem markdown." },
-        { role: "user", content: raw1 }
+          { role: "user", content: raw1 }
         ],
         text: { format: { type: "json_object" } },
         temperature: 0,
