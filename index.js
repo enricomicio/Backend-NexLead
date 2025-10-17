@@ -166,6 +166,7 @@ function buildOrganogramaCLevelFromPeople(people = []) {
   const CTO = pickFrom(tmp, /\b(cto|chief technology|diretor de tecnologia|head of technology)\b/);
   const COO = pickFrom(tmp, /\b(coo|chief operating|diretor de operacoes)\b/);
 
+  // Mantém exatamente o schema/campos que seu app já consome
   return [
     { nome: CEO, Cargo: "CEO" },
     { nome: CFO, Cargo: "CFO" },
@@ -179,7 +180,7 @@ function inferLinkedinPeopleUrlFromDomainOrName(domain, companyName) {
   const host = String(domain || "").toLowerCase().replace(/^https?:\/\//,'').split('/')[0] || "";
   const base = host
     .replace(/^www\./,'')
-    .replace(/\..*$/,'')
+    .replace(/\..*$/,'') // corta .com.br etc
     .replace(/[^a-z0-9-]+/g,'-')
     .replace(/^-+|-+$/g,'');
   const slug = base || (companyName || "")
@@ -204,7 +205,6 @@ async function fetchLinkedInPeople(openaiClient, companyDomain, companyName) {
 
   const target = (companyName || companyDomain || "").trim();
 
-  // Instruções explícitas para o modelo usar Google queries + site filter
   const system = `
 Você é um pesquisador que deve usar web_search para consultar o GOOGLE com consultas específicas e retornar APENAS JSON válido.
 Tarefa: encontrar ATÉ 4 perfis públicos do LinkedIn (linkedin.com/in) de pessoas que ATUALMENTE trabalham em "${target}", com cargos de coordenador para cima.
@@ -266,6 +266,13 @@ Saída desejada:
   return out;
 }
 
+/**
+ * >>> AJUSTE SOLICITADO: Powermap baseado EXCLUSIVAMENTE no organograma <<<
+ * Mantém:
+ * - justificativa com fonte (URL do LinkedIn)
+ * - link company.linkedinPeopleUrl
+ * - não altera nada além de organograma/powermap
+ */
 async function rebuildOrgAndPowerMapFromLinkedIn(openaiClient, finalObj, site) {
   try {
     const companyName = finalObj?.nomedaempresa || finalObj?.company?.name || "";
@@ -287,16 +294,31 @@ async function rebuildOrgAndPowerMapFromLinkedIn(openaiClient, finalObj, site) {
     // ORGANOGRAMA (mantém exatamente o schema esperado pelo app)
     const organograma = buildOrganogramaCLevelFromPeople([...people]);
 
-    // POWERMAP (3 itens: Decisor, Influenciador, Barreira) + fonte explícita
-    const hasCEO = people.some(p => /\b(ceo|president|diretor executivo)\b/i.test(p.title || ""));
-    const pmNodes = people.map(p => ({
+    // === NOVO: powermap baseado EXCLUSIVAMENTE nas pessoas do organograma ===
+    const namesInOrg = new Set(
+      organograma.map(o => (o?.nome || "").trim()).filter(Boolean)
+    );
+
+    // pega somente os perfis usados no organograma
+    const orgPeople = people.filter(p => namesInOrg.has((p.name || "").trim()));
+
+    // detecta se há CEO no organograma (afeta papel do CFO)
+    const hasCEO = organograma.some(o => /^(ceo)$/i.test(o.Cargo) && o.nome);
+
+    // monta candidatos (apenas orgPeople) com fonte explícita
+    const pmCandidates = orgPeople.map(p => ({
       nome: p.name || "",
       cargo: p.title || "",
       classificacao: inferRoleFromTitle(p.title || "", hasCEO),
       justificativa: `Fonte: LinkedIn (${p.profileUrl})`
     }));
 
-    const pickBy = (cls) => pmNodes.find(n => n.classificacao === cls) || { nome: "", cargo: "", classificacao: cls, justificativa: "" };
+    // helper que escolhe o melhor candidato por classe
+    const pickBy = (cls) =>
+      pmCandidates.find(n => n.classificacao === cls) ||
+      { nome: "", cargo: "", classificacao: cls, justificativa: "" };
+
+    // monta o array final (sempre 3 itens, nessa ordem)
     const powermapOut = [
       pickBy("Decisor"),
       pickBy("Influenciador"),
@@ -307,7 +329,7 @@ async function rebuildOrgAndPowerMapFromLinkedIn(openaiClient, finalObj, site) {
     finalObj.powermap = powermapOut;
 
     console.log("[org/powermap] organograma:", JSON.stringify(organograma));
-    console.log("[org/powermap] powermap:", JSON.stringify(pmNodes));
+    console.log("[org/powermap] powermap (from organograma):", JSON.stringify(powermapOut));
 
     return finalObj;
   } catch (e) {
