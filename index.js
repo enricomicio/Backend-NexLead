@@ -118,7 +118,6 @@ function companyNamesSimilar(a = "", b = "") {
   const B = normalizeCompanyName(b).split(/\s+/).filter(Boolean);
   if (!A.length || !B.length) return false;
 
-  // remove tokens pouco informativos
   const stop = new Set([
     "grupo","group","industria","industries","alimentos","foods","food",
     "comercio","commerce","holdings","holding","brasil","brazil"
@@ -167,7 +166,6 @@ function buildOrganogramaCLevelFromPeople(people = []) {
   const CTO = pickFrom(tmp, /\b(cto|chief technology|diretor de tecnologia|head of technology)\b/);
   const COO = pickFrom(tmp, /\b(coo|chief operating|diretor de operacoes)\b/);
 
-  // Mantém exatamente o schema/campos que seu app já consome
   return [
     { nome: CEO, Cargo: "CEO" },
     { nome: CFO, Cargo: "CFO" },
@@ -181,7 +179,7 @@ function inferLinkedinPeopleUrlFromDomainOrName(domain, companyName) {
   const host = String(domain || "").toLowerCase().replace(/^https?:\/\//,'').split('/')[0] || "";
   const base = host
     .replace(/^www\./,'')
-    .replace(/\..*$/,'') // corta .com.br etc
+    .replace(/\..*$/,'')
     .replace(/[^a-z0-9-]+/g,'-')
     .replace(/^-+|-+$/g,'');
   const slug = base || (companyName || "")
@@ -191,39 +189,57 @@ function inferLinkedinPeopleUrlFromDomainOrName(domain, companyName) {
   return slug ? `https://www.linkedin.com/company/${slug}/people/` : null;
 }
 
-// Busca até 4 perfis públicos (>= coordenador), com URL do LinkedIn e empresa atual batendo (similaridade)
+/**
+ * Busca até 4 perfis públicos de LinkedIn usando *Google-style queries*:
+ * - Prioriza resultados de linkedin.com/in
+ * - Palavras-chave PT/EN de senioridade (>= coordenador)
+ * - Empresa atual precisa ser semelhante à empresa alvo
+ * - Mantém apenas {name, title, company, profileUrl}
+ */
 async function fetchLinkedInPeople(openaiClient, companyDomain, companyName) {
+  if (!USE_WEB) {
+    console.log("[linkedin] SEARCH_MODE != web — busca desativada.");
+    return [];
+  }
+
+  const target = (companyName || companyDomain || "").trim();
+
+  // Instruções explícitas para o modelo usar Google queries + site filter
   const system = `
-Você retornará APENAS um JSON válido com até 4 pessoas da empresa alvo.
-Critérios obrigatórios para cada pessoa:
-- "name": nome completo
-- "title": cargo atual (precisa ser coordenador/manager/head/director/VP/C-level)
-- "company": empresa atual no perfil LinkedIn
-- "profileUrl": URL do perfil LinkedIn (página pública)
-Regras:
-- Somente perfis com empresa ATUAL que case com a empresa alvo (normalizada).
-- Excluir consultores/agências/terceiros.
-- Priorizar: CEO, CFO, CIO/CTO, Directors/Heads/Managers (>= coordenador).
-- Máximo 4 pessoas.
-Saída: {"people":[{...}]} — sem texto fora do JSON.`.trim();
+Você é um pesquisador que deve usar web_search para consultar o GOOGLE com consultas específicas e retornar APENAS JSON válido.
+Tarefa: encontrar ATÉ 4 perfis públicos do LinkedIn (linkedin.com/in) de pessoas que ATUALMENTE trabalham em "${target}", com cargos de coordenador para cima.
+REGRAS:
+- FAÇA consultas tipo Google com filtros:
+  1) site:linkedin.com/in (CEO OR CFO OR CIO OR CTO OR "Vice President" OR VP OR Director OR Head OR Manager OR Coordenador OR Gerente) "${target}"
+  2) "CFO" "${target}" site:linkedin.com/in
+  3) "CIO" "${target}" site:linkedin.com/in
+  4) "Diretor" "${target}" site:linkedin.com/in
+- PRIORIZE resultados de linkedin.com/in. Desconsidere outras fontes.
+- Para cada candidato, abra a página (se necessário) e confirme: empresa ATUAL combina com a empresa alvo (aceite variações plausíveis do nome).
+- Campos por pessoa: name, title, company (atual), profileUrl.
+- Limite 4 pessoas.
+- Saída: {"people":[...]} SEM TEXTO FORA DO JSON.`.trim();
 
   const user = `
-Empresa alvo: "${companyName || companyDomain}"
-Tarefa: encontrar até 4 perfis do LinkedIn (públicos) que hoje trabalham na empresa alvo (>= coordenador), com URL do perfil.
-Campos por pessoa: name, title, company, profileUrl.
-Saída: APENAS JSON {"people":[...]}.
+Empresa alvo: "${target}"
+Saída desejada:
+{
+  "people": [
+    {"name":"", "title":"", "company":"", "profileUrl":""}
+  ]
+}
 `.trim();
 
   const req = {
     model: MODEL,
-    tools: USE_WEB ? [{ type: "web_search" }] : [],
+    tools: [{ type: "web_search" }],
     tool_choice: "auto",
     input: [
       { role: "system", content: system },
       { role: "user", content: user }
     ],
     temperature: 0,
-    max_output_tokens: 1200
+    max_output_tokens: 1600
   };
 
   const resp = await openaiClient.responses.create(req);
@@ -237,12 +253,12 @@ Saída: APENAS JSON {"people":[...]}.
       p &&
       p.profileUrl && /linkedin\.com\/in\//i.test(p.profileUrl) &&
       p.title && /\b(ceo|cfo|cio|cto|chief|president|vice president|vp|director|diretor|head|manager|gerente|coordenador|coordinator)\b/i.test(p.title) &&
-      companyNamesSimilar(p.company || "", companyName || companyDomain)
+      companyNamesSimilar(p.company || "", target)
     )
     .slice(0, 4);
 
-  console.log(`[linkedin] candidatos recebidos: ${arr.length}`);
-  console.log(`[linkedin] aprovados após filtro: ${out.length}`);
+  console.log(`[linkedin] (google→linkedin) candidatos recebidos: ${arr.length}`);
+  console.log(`[linkedin] (google→linkedin) aprovados após filtro: ${out.length}`);
   if (arr.length && !out.length) {
     console.log("[linkedin] exemplos rejeitados:", arr.slice(0,3));
   }
@@ -254,13 +270,15 @@ async function rebuildOrgAndPowerMapFromLinkedIn(openaiClient, finalObj, site) {
   try {
     const companyName = finalObj?.nomedaempresa || finalObj?.company?.name || "";
     const domain = site || finalObj?.site || "";
+    const targetName = companyName || domain;
+
     const people = await fetchLinkedInPeople(openaiClient, domain, companyName);
 
     // Se não achou nada confiável, não altera os campos existentes (não quebra nada)
     if (!people || people.length === 0) return finalObj;
 
     // Adiciona link "People" (não interfere se o app não usar)
-    const peopleUrl = inferLinkedinPeopleUrlFromDomainOrName(domain, companyName);
+    const peopleUrl = inferLinkedinPeopleUrlFromDomainOrName(domain, targetName);
     if (peopleUrl) {
       finalObj.company = finalObj.company || {};
       finalObj.company.linkedinPeopleUrl = peopleUrl;
@@ -515,7 +533,7 @@ app.post("/generate", async (req, res) => {
         console.log("[scoring] erro:", e?.message || e);
       }
 
-      // >>> NOVO: reconstrução EXCLUSIVA de organograma/powermap via LinkedIn
+      // >>> NOVO: reconstrução EXCLUSIVA de organograma/powermap via Google→LinkedIn
       try {
         await rebuildOrgAndPowerMapFromLinkedIn(openai, obj1, site);
       } catch (e) {
@@ -583,7 +601,7 @@ app.post("/generate", async (req, res) => {
       console.log('[scoring] falhou ao gerar top3:', e?.message || e);
     }
 
-    // >>> NOVO: reconstrução EXCLUSIVA de organograma/powermap via LinkedIn
+    // >>> NOVO: reconstrução EXCLUSIVA de organograma/powermap via Google→LinkedIn
     try {
       await rebuildOrgAndPowerMapFromLinkedIn(openai, finalObj, site);
     } catch (e) {
