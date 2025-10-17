@@ -102,7 +102,7 @@ async function callOAIWithMaxToolCalls(oaiReq, maxToolCalls) {
   }
 }
 
-// ====== INÍCIO: Utils EXCLUSIVOS para Organograma/PowerMap (LinkedIn-only) ======
+// ====== INÍCIO: Utils EXCLUSIVOS para Organograma/PowerMap ======
 function normalizeCompanyName(s = "") {
   return String(s)
     .toLowerCase()
@@ -110,29 +110,6 @@ function normalizeCompanyName(s = "") {
     .replace(/\b(ltda|s\/?a|sa|holdings?)\b/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
-}
-
-// Similaridade de nomes de empresa (mais tolerante que igualdade exata)
-function companyNamesSimilar(a = "", b = "") {
-  const A = normalizeCompanyName(a).split(/\s+/).filter(Boolean);
-  const B = normalizeCompanyName(b).split(/\s+/).filter(Boolean);
-  if (!A.length || !B.length) return false;
-
-  const stop = new Set([
-    "grupo","group","industria","industries","alimentos","foods","food",
-    "comercio","commerce","holdings","holding","brasil","brazil"
-  ]);
-  const AA = A.filter(t => !stop.has(t));
-  const BB = B.filter(t => !stop.has(t));
-  if (!AA.length || !BB.length) return false;
-
-  const setB = new Set(BB);
-  let hits = 0;
-  for (const t of AA) if (setB.has(t)) hits++;
-  const recallA = hits / AA.length;
-  const recallB = hits / BB.length;
-
-  return (recallA >= 0.5 && recallB >= 0.5) || normalizeCompanyName(a) === normalizeCompanyName(b);
 }
 
 function inferRoleFromTitle(title = "", hasCEO = false) {
@@ -149,30 +126,46 @@ function inferRoleFromTitle(title = "", hasCEO = false) {
   return "Influenciador";
 }
 
-function buildOrganogramaCLevelFromPeople(people = []) {
-  const pickFrom = (list, regex) => {
-    const idx = list.findIndex(p => regex.test((p.title || "").toLowerCase()));
-    if (idx >= 0) {
-      const p = list[idx];
-      list.splice(idx, 1);
-      return p.name || "";
-    }
-    return "";
+// Monta organograma tentando casar por cargo; se não houver, preenche na ordem
+function buildOrganogramaCLevelLoose(people = []) {
+  const out = [
+    { nome: "", Cargo: "CEO" },
+    { nome: "", Cargo: "CFO" },
+    { nome: "", Cargo: "CTO" },
+    { nome: "", Cargo: "COO" }
+  ];
+
+  const byRoleRegex = {
+    CEO: /\b(ceo|president|diretor executivo)\b/i,
+    CFO: /\b(cfo|diretor financeiro|vp finance)\b/i,
+    CTO: /\b(cto|chief technology|diretor de tecnologia|head of technology)\b/i,
+    COO: /\b(coo|chief operating|diretor de operacoes)\b/i
   };
 
-  const tmp = [...people];
-  const CEO = pickFrom(tmp, /\b(ceo|president|diretor executivo)\b/);
-  const CFO = pickFrom(tmp, /\b(cfo|diretor financeiro|vp finance)\b/);
-  const CTO = pickFrom(tmp, /\b(cto|chief technology|diretor de tecnologia|head of technology)\b/);
-  const COO = pickFrom(tmp, /\b(coo|chief operating|diretor de operacoes)\b/);
+  // 1) tenta casar por regex de cargo
+  const used = new Set();
+  for (let i = 0; i < out.length; i++) {
+    const role = out[i].Cargo;
+    const rx = byRoleRegex[role];
+    const idx = people.findIndex((p, j) => !used.has(j) && rx.test(p.title || ""));
+    if (idx >= 0) {
+      out[i].nome = people[idx].name || "";
+      used.add(idx);
+    }
+  }
 
-  // Mantém exatamente o schema/campos que seu app já consome
-  return [
-    { nome: CEO, Cargo: "CEO" },
-    { nome: CFO, Cargo: "CFO" },
-    { nome: CTO, Cargo: "CTO" },
-    { nome: COO, Cargo: "COO" }
-  ];
+  // 2) preenche o que sobrou na ordem de chegada
+  for (let i = 0; i < out.length; i++) {
+    if (!out[i].nome) {
+      const idx = people.findIndex((p, j) => !used.has(j));
+      if (idx >= 0) {
+        out[i].nome = people[idx].name || "";
+        used.add(idx);
+      }
+    }
+  }
+
+  return out;
 }
 
 // Link do LinkedIn People a partir do domínio/nome (para o botão no app)
@@ -191,11 +184,9 @@ function inferLinkedinPeopleUrlFromDomainOrName(domain, companyName) {
 }
 
 /**
- * Busca até 4 perfis públicos de LinkedIn usando *Google-style queries*:
- * - Prioriza resultados de linkedin.com/in
- * - Palavras-chave PT/EN de senioridade (>= coordenador)
- * - Empresa atual precisa ser semelhante à empresa alvo
- * - Mantém apenas {name, title, company, profileUrl}
+ * NOVO: Busca as 4 primeiras pessoas via Google → LinkedIn, sem filtros de cargo/empresa.
+ * ÚNICO filtro: URL precisa ser de perfil de pessoa no LinkedIn (linkedin.com/in/…).
+ * Campos: name, title, profileUrl (company opcional).
  */
 async function fetchLinkedInPeople(openaiClient, companyDomain, companyName) {
   if (!USE_WEB) {
@@ -206,28 +197,27 @@ async function fetchLinkedInPeople(openaiClient, companyDomain, companyName) {
   const target = (companyName || companyDomain || "").trim();
 
   const system = `
-Você é um pesquisador que deve usar web_search para consultar o GOOGLE com consultas específicas e retornar APENAS JSON válido.
-Tarefa: encontrar ATÉ 4 perfis públicos do LinkedIn (linkedin.com/in) de pessoas que ATUALMENTE trabalham em "${target}", com cargos de coordenador para cima.
+Você usará web_search (Google) e retornará APENAS JSON válido.
+Objetivo: pegar AS 4 PRIMEIRAS PESSOAS que apareçam nos resultados do Google para a empresa alvo, com LinkedIn.
+Consulta base (varie PT/EN):
+- coordenador, diretor, CFO, CEO, CIO "${target}" linkedin
+- (CEO OR CFO OR CIO OR CTO OR Director OR Head OR Manager) "${target}" linkedin
+
 REGRAS:
-- FAÇA consultas tipo Google com filtros:
-  1) site:linkedin.com/in (CEO OR CFO OR CIO OR CTO OR "Vice President" OR VP OR Director OR Head OR Manager OR Coordenador OR Gerente) "${target}"
-  2) "CFO" "${target}" site:linkedin.com/in
-  3) "CIO" "${target}" site:linkedin.com/in
-  4) "Diretor" "${target}" site:linkedin.com/in
-- PRIORIZE resultados de linkedin.com/in. Desconsidere outras fontes.
-- Para cada candidato, abra a página (se necessário) e confirme: empresa ATUAL combina com a empresa alvo (aceite variações plausíveis do nome).
-- Campos por pessoa: name, title, company (atual), profileUrl.
-- Limite 4 pessoas.
-- Saída: {"people":[...]} SEM TEXTO FORA DO JSON.`.trim();
+- Considere somente URLs de PERFIL DE PESSOA: tem que conter "linkedin.com/in/".
+- Para cada pessoa, tente obter: name, title, profileUrl. (company se conseguir; opcional)
+- Preservar a ordem dos primeiros resultados válidos encontrados.
+- Limite: 4 pessoas.
+- Saída: {"people":[{"name":"","title":"","profileUrl":"","company":""?}, ...]} — sem texto fora do JSON.
+`.trim();
 
   const user = `
 Empresa alvo: "${target}"
-Saída desejada:
-{
-  "people": [
-    {"name":"", "title":"", "company":"", "profileUrl":""}
-  ]
-}
+Retorne até 4 pessoas (primeiros resultados válidos) do LinkedIn, com:
+- name
+- title
+- profileUrl (obrigatório; precisa ser "linkedin.com/in/")
+- company (se conseguir)
 `.trim();
 
   const req = {
@@ -247,18 +237,19 @@ Saída desejada:
   const data = sanitizeAndParse(raw);
   const arr = Array.isArray(data?.people) ? data.people : [];
 
-  // Filtro final defensivo + limite 4
+  // ÚNICO filtro real: precisa ser linkedin.com/in/
   const out = arr
-    .filter(p =>
-      p &&
-      p.profileUrl && /linkedin\.com\/in\//i.test(p.profileUrl) &&
-      p.title && /\b(ceo|cfo|cio|cto|chief|president|vice president|vp|director|diretor|head|manager|gerente|coordenador|coordinator)\b/i.test(p.title) &&
-      companyNamesSimilar(p.company || "", target)
-    )
-    .slice(0, 4);
+    .filter(p => p && p.profileUrl && /linkedin\.com\/in\//i.test(p.profileUrl))
+    .slice(0, 4)
+    .map(p => ({
+      name: p.name || "",
+      title: p.title || "",
+      profileUrl: p.profileUrl,
+      company: p.company || ""
+    }));
 
-  console.log(`[linkedin] (google→linkedin) candidatos recebidos: ${arr.length}`);
-  console.log(`[linkedin] (google→linkedin) aprovados após filtro: ${out.length}`);
+  console.log(`[linkedin] (google→linkedin, sem filtros de cargo) recebidos: ${arr.length}`);
+  console.log(`[linkedin] aprovados (linkedin.com/in): ${out.length}`);
   if (arr.length && !out.length) {
     console.log("[linkedin] exemplos rejeitados:", arr.slice(0,3));
   }
@@ -267,11 +258,8 @@ Saída desejada:
 }
 
 /**
- * >>> AJUSTE SOLICITADO: Powermap baseado EXCLUSIVAMENTE no organograma <<<
- * Mantém:
- * - justificativa com fonte (URL do LinkedIn)
- * - link company.linkedinPeopleUrl
- * - não altera nada além de organograma/powermap
+ * Powermap baseado EXCLUSIVAMENTE no organograma.
+ * Cada item traz justificativa com a fonte (URL do LinkedIn).
  */
 async function rebuildOrgAndPowerMapFromLinkedIn(openaiClient, finalObj, site) {
   try {
@@ -281,31 +269,25 @@ async function rebuildOrgAndPowerMapFromLinkedIn(openaiClient, finalObj, site) {
 
     const people = await fetchLinkedInPeople(openaiClient, domain, companyName);
 
-    // Se não achou nada confiável, não altera os campos existentes (não quebra nada)
     if (!people || people.length === 0) return finalObj;
 
-    // Adiciona link "People" (não interfere se o app não usar)
+    // Link "People" (opcional para o app)
     const peopleUrl = inferLinkedinPeopleUrlFromDomainOrName(domain, targetName);
     if (peopleUrl) {
       finalObj.company = finalObj.company || {};
       finalObj.company.linkedinPeopleUrl = peopleUrl;
     }
 
-    // ORGANOGRAMA (mantém exatamente o schema esperado pelo app)
-    const organograma = buildOrganogramaCLevelFromPeople([...people]);
+    // ORGANOGRAMA: agora usa ordem dos 4 primeiros, com tentativa de casar por cargo
+    const organograma = buildOrganogramaCLevelLoose(people);
 
-    // === NOVO: powermap baseado EXCLUSIVAMENTE nas pessoas do organograma ===
-    const namesInOrg = new Set(
-      organograma.map(o => (o?.nome || "").trim()).filter(Boolean)
-    );
-
-    // pega somente os perfis usados no organograma
+    // Powermap só com as pessoas do organograma
+    const namesInOrg = new Set(organograma.map(o => (o?.nome || "").trim()).filter(Boolean));
     const orgPeople = people.filter(p => namesInOrg.has((p.name || "").trim()));
 
-    // detecta se há CEO no organograma (afeta papel do CFO)
     const hasCEO = organograma.some(o => /^(ceo)$/i.test(o.Cargo) && o.nome);
 
-    // monta candidatos (apenas orgPeople) com fonte explícita
+    // monta candidatos com fonte
     const pmCandidates = orgPeople.map(p => ({
       nome: p.name || "",
       cargo: p.title || "",
@@ -313,12 +295,10 @@ async function rebuildOrgAndPowerMapFromLinkedIn(openaiClient, finalObj, site) {
       justificativa: `Fonte: LinkedIn (${p.profileUrl})`
     }));
 
-    // helper que escolhe o melhor candidato por classe
     const pickBy = (cls) =>
       pmCandidates.find(n => n.classificacao === cls) ||
       { nome: "", cargo: "", classificacao: cls, justificativa: "" };
 
-    // monta o array final (sempre 3 itens, nessa ordem)
     const powermapOut = [
       pickBy("Decisor"),
       pickBy("Influenciador"),
@@ -361,7 +341,7 @@ Você **PODE** usar web_search sempre que precisar de informação externa e dev
   - Se a fonte estiver em **USD**, retorne **ambos**: "US$ X (AAAA) ≈ R$ Y – câmbio 5,0 BRL/USD – fonte: ...".
   - Se **não** houver fonte direta, **estime** com critério explícito (receita/funcionário do setor × funcionários; comparação com pares; faixas de imprensa).
 - **erpatualouprovavel**: escolha entre { SAP S/4HANA, SAP ECC, SAP Business One, Oracle NetSuite, TOTVS Protheus, Senior, Sankhya, Omie, desenvolvimento próprio, outro ERP de nicho } com base em porte/segmento/notícias/ecossistema. Explique em **justificativaERP** de forma sucinta e factual.
-- **solucaofiscalouprovavel**: escolha entre { Thomson Reuters, Sovos, Solutio, Avalara, Guepardo, 4Tax, BPO fiscal, planilhas/house } com critério do motivo dessa solução fiscal ser selecionada ou estimada (não esquecer de colocar o nome da solução fiscal),  em **criteriofiscal** (porte/ERP/segmento/custo/notícias).
+- **solucaofiscalouprovavel**: escolha entre { Thomson Reuters, Sovos, Solutio, Avalara, Guepardo, 4Tax, BPO fiscal, planilhas/house } com critério do motivo dessas soluções serem selecionadas ou estimadas (não esquecer de colocar o nome da solução fiscal),  em **criteriofiscal** (porte/ERP/segmento/custo/notícias).
 - **principaldordonegocio**: 1–2 frases sobre dores relevantes (ex.: eficiência operacional, compliance, escalabilidade, SLAs, omnichannel, prazos regulatórios).
 - **investimentoemti**: se houver benchmark setorial, use-o (cite o critério).
   - Caso contrário, **2% do faturamento** (em **R$**). Se o faturamento estiver em USD, **converta** primeiro usando **câmbio 5,0 BRL/USD** e explique: "Critério: 2% de R$ {faturamento convertido}".
@@ -546,7 +526,7 @@ app.post("/generate", async (req, res) => {
     }
 
     if (!missingOrWeak.length) {
-      // >>> NOVO: top3 antes de retornar
+      // >>> top3 antes de retornar (inalterado)
       try {
         const { erp_top3, fiscal_top3 } = buildTop3(obj1);
         obj1.erp_top3 = erp_top3;
@@ -555,7 +535,7 @@ app.post("/generate", async (req, res) => {
         console.log("[scoring] erro:", e?.message || e);
       }
 
-      // >>> NOVO: reconstrução EXCLUSIVA de organograma/powermap via Google→LinkedIn
+      // >>> Organograma/Powermap via Google→LinkedIn
       try {
         await rebuildOrgAndPowerMapFromLinkedIn(openai, obj1, site);
       } catch (e) {
@@ -614,7 +594,7 @@ app.post("/generate", async (req, res) => {
 
     const finalObj = { ...obj1, ...(obj2 || {}) };
 
-    // >>> NOVO: calcula e anexa Top 3 de ERP e Fiscal (inalterado)
+    // >>> top3 (inalterado)
     try {
       const { erp_top3, fiscal_top3 } = buildTop3(finalObj);
       finalObj.erp_top3 = erp_top3;
@@ -623,7 +603,7 @@ app.post("/generate", async (req, res) => {
       console.log('[scoring] falhou ao gerar top3:', e?.message || e);
     }
 
-    // >>> NOVO: reconstrução EXCLUSIVA de organograma/powermap via Google→LinkedIn
+    // >>> Organograma/Powermap via Google→LinkedIn
     try {
       await rebuildOrgAndPowerMapFromLinkedIn(openai, finalObj, site);
     } catch (e) {
