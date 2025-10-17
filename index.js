@@ -103,259 +103,189 @@ async function callOAIWithMaxToolCalls(oaiReq, maxToolCalls) {
 }
 
 /* =======================================================================
-   EXCLUSIVO PARA ORGANOGRAMA/POWERMAP SEM LINKEDIN (apenas SERP pública)
+   *** ENRIQUECIMENTO SÓ COM web_search (sem LinkedIn) ***
+   - Busca nomes/cargos em fontes que o web_search consegue abrir:
+     site institucional, imprensa, reguladores (CVM/B3), mídia econômica.
+   - Exige URL de fonte por pessoa; descarta sem fonte; ignora LinkedIn.
    ======================================================================= */
 
-// Normaliza domínio a partir de site informado
-function normalizeCompanySlugFromSite(site = "") {
+function domainFromSite(site = "") {
   const host = String(site || "").toLowerCase().replace(/^https?:\/\//,'').split('/')[0] || "";
   if (!host) return "";
-  const base = host.replace(/^www\./,'').replace(/\..*$/,'').replace(/[^a-z0-9-]+/g,'-').replace(/^-+|-+$/g,'');
-  return base;
+  return host.replace(/^www\./,'');
 }
 
-// Heurística simples de classificação p/ Powermap
-function inferRoleFromTitle(title = "", hasCEO = false) {
-  const t = String(title).toLowerCase();
-  const isCEO = /\b(ceo|president|presidente|diretor executivo)\b/.test(t);
-  const isCFO = /\b(cfo|diretor financeiro|vp finance|finance director)\b/.test(t);
-  const isIT  = /\b(cio|cto|head of it|it director|technology|inform[aá]tica|ti|information)\b/.test(t);
-  const isOps = /\b(coo|operations|opera[cç][aã]o|operational)\b/.test(t);
-  const isBlocker = /\b(procurement|compras|sourcing|legal|compliance|security|jur[ií]dico)\b/.test(t);
-  if (isCEO) return "Decisor";
-  if (isCFO) return hasCEO ? "Influenciador" : "Decisor";
-  if (isIT || isOps)  return "Influenciador";
-  if (isBlocker) return "Barreira";
-  return "Influenciador";
+const ALLOWED_HINTS = [
+  "liderança","leadership","executivos","management","governança","governanca",
+  "diretoria","conselho","quem somos","sobre","investor relations","sala de imprensa",
+  "press","notícias","news","release","comunicado","resultado","CVM","B3"
+];
+
+const FORBIDDEN_SOURCES = [
+  /(^|\.)linkedin\.com$/i,
+  /(^|\.)br\.linkedin\.com$/i,
+  /(^|\.)pt\.linkedin\.com$/i
+];
+
+function isForbidden(url="") {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    return FORBIDDEN_SOURCES.some(rx => rx.test(host));
+  } catch { return true; }
 }
 
-// Monta organograma C-Level de forma "solta" com base em cargos identificados
-function buildOrganogramaCLevelLoose(people = []) {
-  const out = [
+function isProbablyOkSource(url="") {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    if (isForbidden(url)) return false;
+    // aceitar site institucional e mídia/órgãos comuns
+    return true;
+  } catch { return false; }
+}
+
+function mapPeopleToOrganograma(people=[]) {
+  const org = [
     { nome: "", Cargo: "CEO" },
     { nome: "", Cargo: "CFO" },
     { nome: "", Cargo: "CTO" },
     { nome: "", Cargo: "COO" }
   ];
-  const byRoleRegex = {
-    CEO: /\b(ceo|president|presidente|diretor executivo)\b/i,
-    CFO: /\b(cfo|diretor financeiro|vp finance|finance director)\b/i,
-    CTO: /\b(cto|chief technology|diretor de tecnologia|head of technology|technology officer)\b/i,
-    COO: /\b(coo|chief operating|diretor de opera[cç][aã]o|operations officer)\b/i
+
+  const rx = {
+    CEO: /\b(ceo|presidente|president|diretor executivo|chief executive)\b/i,
+    CFO: /\b(cfo|diretor financeiro|finance director|chief financial)\b/i,
+    CTO: /\b(cto|diretor de tecnologia|chief technology)\b/i,
+    COO: /\b(coo|diretor de opera[cç][aã]o|chief operating)\b/i
   };
 
   const used = new Set();
-  // (1) casar pelo cargo
-  for (let i = 0; i < out.length; i++) {
-    const role = out[i].Cargo;
-    const rx = byRoleRegex[role];
-    const idx = people.findIndex((p, j) => !used.has(j) && rx.test(p.title || ""));
-    if (idx >= 0) {
-      out[i].nome = people[idx].name || "";
-      used.add(idx);
+  // 1) casar cargos
+  for (let i=0;i<org.length;i++){
+    const role = org[i].Cargo;
+    const idx = people.findIndex((p,j)=>!used.has(j) && rx[role].test(p.cargo||""));
+    if (idx>=0){ org[i].nome = people[idx].nome; used.add(idx); }
+  }
+  // 2) preencher sobras
+  for (let i=0;i<org.length;i++){
+    if (!org[i].nome){
+      const idx = people.findIndex((p,j)=>!used.has(j));
+      if (idx>=0){ org[i].nome = people[idx].nome; used.add(idx); }
     }
   }
-  // (2) completar slots vazios em ordem
-  for (let i = 0; i < out.length; i++) {
-    if (!out[i].nome) {
-      const idx = people.findIndex((p, j) => !used.has(j));
-      if (idx >= 0) { out[i].nome = people[idx].name || ""; used.add(idx); }
-    }
-  }
-  return out;
+  return org;
 }
 
-// Transforma itens de SERP (título/snippet/url) em pessoas (nome + cargo), EXCLUINDO LinkedIn
-function normalizeSerpToPeopleFromPublicWeb(items = []) {
-  const results = [];
-  const seen = new Set();
-
-  for (const it of items) {
-    const url = String(it?.url || it?.link || "").trim();
-    if (!url) continue;
-    if (/linkedin\.com\/(company|in)\//i.test(url)) continue; // exclui LinkedIn
-    if (seen.has(url)) continue;
-    seen.add(url);
-
-    const title = (it?.title || it?.name || "").trim();
-    const snippet = (it?.snippet || it?.description || "").trim();
-    if (!title) continue;
-
-    // Heurística de extração: "Nome – Cargo – Empresa" | ou "Nome | Empresa | Cargo" (varia por site)
-    let name = "";
-    let cargo = "";
-
-    // Split por " | " primeiro (comum em mídia/evento)
-    let base = title.split("|")[0].trim();
-    // Depois tenta split por " – " (hífen longo) ou "-" simples
-    let parts = base.split(" – ");
-    if (parts.length < 2) parts = base.split(" - ");
-
-    if (parts.length >= 2) {
-      name = parts[0].trim();
-      cargo = parts[1].trim();
-    } else {
-      // fallback: usa snippet para tentar cargo
-      name = base.trim();
-      if (snippet) {
-        const m = snippet.match(/(?:^|\.\s)([^.]{3,80}?(?:diretor|vice|presidente|ceo|cfo|cio|cto|gerente|coordenador|head)[^.]{0,80})(?:\.|$)/i);
-        if (m && m[1]) cargo = m[1].trim();
-      }
-    }
-
-    // filtros mínimos
-    if (!name || name.length < 3) continue;
-    if (!cargo) {
-      // cargo muito vazio → ainda pode servir, mas piora a qualidade
-      // mantemos para completar slots, mas daremos prioridade aos com cargo
-    }
-
-    results.push({ name, title: cargo, url, source: url, rawTitle: title, rawSnippet: snippet });
-    if (results.length >= 16) break;
-  }
-
-  // ordena priorizando quem tem cargo
-  results.sort((a, b) => {
-    const aw = a.title ? 0 : 1;
-    const bw = b.title ? 0 : 1;
-    return aw - bw;
-  });
-
-  return results;
+function inferClassificacao(role="", hasCEO=false){
+  const t = String(role||"").toLowerCase();
+  if (/\b(ceo|presidente)\b/.test(t)) return "Decisor";
+  if (/\b(cfo|finance)\b/.test(t)) return hasCEO ? "Influenciador" : "Decisor";
+  if (/\b(cio|cto|ti|technology|oper[aç]ões|operations|coo)\b/.test(t)) return "Influenciador";
+  if (/\b(procurement|compras|jur[ií]dico|legal|compliance|security)\b/.test(t)) return "Barreira";
+  return "Influenciador";
 }
 
-// Faz a busca na web (SERP) pedindo APENAS JSON com {items: [{url,title,snippet}]}, excluindo LinkedIn
-async function fetchExecsFromPublicWeb(openaiClient, target) {
-  const queries = [
-    // site institucional
-    `site:${target} (CEO OR CFO OR CIO OR CTO OR Diretor OR Vice-Presidente OR Presidente)`,
-  ];
+function buildPowermapFromPeople(org, people){
+  const hasCEO = org.some(o=>o.Cargo==="CEO" && o.nome);
+  const base = people.map(p=>({
+    nome: p.nome,
+    cargo: p.cargo || "",
+    classificacao: inferClassificacao(p.cargo||"", hasCEO),
+    justificativa: `Fonte: ${p.fonte}`
+  }));
+  const pick = (cls)=> base.find(x=>x.classificacao===cls) || { nome:"", cargo:"", classificacao:cls, justificativa:"Sem evidência forte" };
+  return [ pick("Decisor"), pick("Influenciador"), pick("Barreira") ];
+}
 
-  // Se target não for domínio, tentamos empresa por nome em fontes de imprensa/eventos
-  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(target)) {
-    queries.push(
-      `"${target}" (CEO OR CFO OR CIO OR CTO OR Diretor OR Vice-Presidente OR Presidente) site:.br`,
-      `"${target}" (CEO OR CFO OR CIO OR CTO OR Diretor OR Vice-Presidente OR Presidente) site:valor.globo.com`,
-      `"${target}" (CEO OR CFO OR CIO OR CTO OR Diretor OR Vice-Presidente OR Presidente) site:exame.com`,
-      `"${target}" (CEO OR CFO OR CIO OR CTO OR Diretor OR Vice-Presidente OR Presidente) site:g1.globo.com`,
-      `"${target}" (CEO OR CFO OR CIO OR CTO OR Diretor OR Vice-Presidente OR Presidente) site:neofeed.com.br`,
-      `"${target}" (CEO OR CFO OR CIO OR CTO OR Diretor OR Vice-Presidente OR Presidente) site:baguete.com.br`,
-      `"${target}" (CEO OR CFO OR CIO OR CTO OR Diretor OR Vice-Presidente OR Presidente) site:meioemensagem.com.br`,
-      `"${target}" (CEO OR CFO OR CIO OR CTO OR Diretor OR Vice-Presidente OR Presidente) site:events*`,
-      `"${target}" liderança OR leadership`,
-      `"${target}" imprensa OR newsroom`
-    );
+async function enrichOrgPowermapWithWebSearch(site, companyName, baseObj){
+  const domain = domainFromSite(site||baseObj?.site||"");
+  const alvo = companyName || domain || site;
+
+  if (!USE_WEB || !alvo) {
+    console.log("[org-web] web_search indisponível ou alvo vazio — pulando");
+    return baseObj;
   }
 
+  // System e User focados só em pessoas e com fonte (sem LinkedIn)
   const system = `
-Use web_search e retorne APENAS JSON com os resultados da SERP.
-NUNCA clique nem abra páginas bloqueadas; NÃO inclua linkedin.com (company/in) nos resultados.
-Formato de saída rigoroso:
-{"items":[{"url":"","title":"","snippet":""}, ...]}
-Inclua no máximo 20 itens por consulta.
+Você é um agente que **usa web_search** e retorna **apenas JSON**.
+Objetivo: encontrar **nomes e cargos** (coordenador+ para cima) da empresa alvo **sem usar LinkedIn** (ignorar qualquer resultado de linkedin).
+Priorize: site institucional da empresa, páginas "liderança/governança/diretoria", sala de imprensa, CVM/B3, mídia econômica (Valor, Exame, NeoFeed, G1 Economia etc).
+Para **cada pessoa**, retorne também **"fonte" (URL)** exata onde o nome/cargo aparece.
+Máximo 6 pessoas úteis. Se aparecerem repetidas, mantenha a melhor fonte (institucional > mídia > outros).
+Saída: **somente** JSON.
 `.trim();
 
-  const collected = [];
-  const seenUrl = new Set();
+  const queryHints = [
+    `site:${domain} (${ALLOWED_HINTS.join(" OR ")})`,
+    `${alvo} diretoria OR liderança OR executivos`,
+    `${alvo} CEO OR CFO OR CTO OR COO site:${domain}`,
+    `${alvo} governança OR conselho OR "quem somos"`,
+    `${alvo} Valor Econômico OR Exame OR NeoFeed OR "sala de imprensa"`,
+    `${alvo} CVM formulário de referência`
+  ];
 
-  for (const q of queries) {
-    const req = {
-      model: MODEL,
-      tools: [{ type: "web_search" }],
-      tool_choice: "auto",
-      input: [
-        { role: "system", content: system },
-        { role: "user", content: `Consulta: ${q}\nObservação: EXCLUA linkedin.com dos resultados.` }
-      ],
-      temperature: 0,
-      max_output_tokens: 900
-    };
-
-    try {
-      const resp = await openaiClient.responses.create(req);
-      const raw = resp.output_text || "";
-      printRaw(`[public SERP][raw] q="${q}"`, raw);
-      const data = sanitizeAndParse(raw);
-      const items = Array.isArray(data?.items) ? data.items : [];
-      for (const it of items) {
-        const url = String(it?.url || it?.link || "");
-        if (!url) continue;
-        if (/linkedin\.com\/(company|in)\//i.test(url)) continue; // exclui LinkedIn
-        if (seenUrl.has(url)) continue;
-        seenUrl.add(url);
-        collected.push({
-          url,
-          title: it?.title || it?.name || "",
-          snippet: it?.snippet || it?.description || ""
-        });
-      }
-      if (collected.length >= 24) break;
-    } catch (e) {
-      console.log("[public SERP] erro:", e?.message || e);
-    }
-  }
-
-  console.log(`[public SERP] total itens coletados (sem LinkedIn): ${collected.length}`);
-  return collected;
+  const user = `
+Empresa alvo: ${alvo}
+Gere um JSON **válido** no formato:
+{
+  "people": [
+    { "nome": "Nome Sobrenome", "cargo": "Cargo (ex.: CFO)", "fonte": "https://... (sem linkedin)" }
+  ]
 }
 
-// Reconstrói organograma/powermap com base SOMENTE em fontes públicas não-LinkedIn
-async function rebuildOrgAndPowerMapFromPublicWeb(openaiClient, finalObj, site) {
-  try {
-    const companyName = finalObj?.nomedaempresa || "";
-    const domainSlug = normalizeCompanySlugFromSite(site || finalObj?.site || "");
-    const target = domainSlug || companyName;
-    if (!target) return finalObj;
+Regras:
+- **NÃO** use LinkedIn (se aparecer, ignore).
+- **Obrigatório**: "fonte" com URL pública confiável.
+- Tente 4–6 pessoas.
+- Se a fonte trouxer só nome, mas a notícia/press room indicar o cargo, pode usar o cargo da notícia (e cite essa URL).
+Consultas sugeridas (você pode rodar variações com web_search):
+${queryHints.map(q=>`- ${q}`).join("\n")}
+`.trim();
 
-    console.log("[org/powermap][public] procurando executivos para:", target);
-    const serpItems = await fetchExecsFromPublicWeb(openaiClient, target);
-    const people = normalizeSerpToPeopleFromPublicWeb(serpItems);
-    console.log("[org/powermap][public] pessoas (normalizadas, sem LinkedIn):", JSON.stringify(people, null, 2));
+  const req = {
+    model: MODEL,
+    tools: USE_WEB ? [{ type: "web_search" }] : [],
+    tool_choice: "auto",
+    input: [
+      { role: "system", content: system },
+      { role: "user", content: user }
+    ],
+    temperature: 0,
+    max_output_tokens: 1500
+  };
 
-    if (!people || people.length === 0) {
-      console.log("[org/powermap][public] nenhuma pessoa encontrada; preservando campos atuais");
-      return finalObj;
-    }
+  console.log("[org-web] enriquecendo organograma/powermap via web_search…");
+  const resp = await callOAIWithMaxToolCalls(req, 8);
+  printRaw("[org-web][raw]", resp.output_text || "");
+  printToolsDetected(resp);
 
-    // ORGANOGRAMA (4 slots) → prioriza quem tem cargo
-    const chosen = [...people].slice(0, 8);
-    const organograma = buildOrganogramaCLevelLoose(chosen);
+  const obj = sanitizeAndParse(resp.output_text || "");
+  const arr = Array.isArray(obj?.people) ? obj.people : [];
 
-    // POWermap: somente a partir dos nomes do organograma
-    const namesInOrg = new Set(organograma.map(o => (o?.nome || "").trim()).filter(Boolean));
-    const orgPeople = chosen.filter(p => namesInOrg.has((p.name || "").trim()));
-    const hasCEO = organograma.some(o => /^(ceo)$/i.test(o.Cargo) && o.nome);
-
-    const pmCandidates = orgPeople.map(p => ({
-      nome: p.name || "",
-      cargo: p.title || "",
-      classificacao: inferRoleFromTitle(p.title || "", hasCEO),
-      justificativa: `Fonte: ${p.source || p.url}`
-    }));
-
-    const pickBy = (cls) =>
-      pmCandidates.find(n => n.classificacao === cls) ||
-      { nome: "", cargo: "", classificacao: cls, justificativa: "Fonte: SERP (site institucional/imprensa/evento)" };
-
-    const powermapOut = [
-      pickBy("Decisor"),
-      pickBy("Influenciador"),
-      pickBy("Barreira")
-    ];
-
-    // Anexa origem no organograma (não mudando schema: só mantém nomes e Cargos)
-    finalObj.organogramaclevel = organograma;
-    finalObj.powermap = powermapOut;
-
-    console.log("[org/powermap][public] organograma:", JSON.stringify(organograma));
-    console.log("[org/powermap][public] powermap:", JSON.stringify(powermapOut));
-    return finalObj;
-  } catch (e) {
-    console.log("[org/powermap][public] falha:", e?.message || e);
-    return finalObj;
+  // Sanitizar: remover fontes proibidas e obrigar nome+fonte
+  const clean = [];
+  for (const p of arr) {
+    const nome  = String(p?.nome || "").trim();
+    const cargo = String(p?.cargo || "").trim();
+    const fonte = String(p?.fonte || "").trim();
+    if (!nome || !fonte) continue;
+    if (!isProbablyOkSource(fonte)) continue;
+    clean.push({ nome, cargo, fonte });
   }
-}
 
+  console.log(`[org-web] pessoas úteis: ${clean.length}`);
+  if (!clean.length) return baseObj;
+
+  // Montar organograma e powermap
+  const org = mapPeopleToOrganograma(clean);
+  const pm  = buildPowermapFromPeople(org, clean.slice(0,4));
+
+  baseObj.organogramaclevel = org;
+  baseObj.powermap = pm;
+  return baseObj;
+}
 /* =============================== FIM BLOCO ORG/PM =============================== */
 
 // ===== PROMPTS =====
@@ -368,52 +298,19 @@ Você **PODE** usar web_search sempre que precisar de informação externa e dev
 
 ### Padrões de qualidade por campo
 - **nomedaempresa**: razão social oficial da **MATRIZ** (se houver S/A, LTDA, etc., mantenha).
-- **cnpj**: CNPJ da **MATRIZ** no formato 00.000.000/0001-00 (fonte: site institucional, políticas legais, CVM, portal gov.br, perfis oficiais).
-- **mapa**: **URL clicável do perfil oficial no Google Maps** da MATRIZ (ex.: "https://www.google.com/maps/place/..."). **Não** retorne apenas endereço textual.
-- **telefonepublico**: telefone público do site institucional; se não houver, use o do perfil no Google Maps.
-- **segmento / subsegmento**: concisos e coerentes com a atuação principal (ex.: "Tecnologia / Provedores de conteúdo na internet").
-- **fundacao**: ano (AAAA) ou data completa (DD/MM/AAAA) se constar oficialmente.
-- **localização**: Cidade/UF da MATRIZ (ex.: "São Paulo, SP").
-- **funcionarios**: real (com fonte). Se não houver, **estime** com critério claro (ex.: LinkedIn, notícias, porte; formato sugerido: "1.001–5.000 (estimativa — critério: headcount LinkedIn)".
-- **faturamento**: se houver valor confiável, retorne "R$ X/ano (AAAA) – fonte: ...".
-  - Se a fonte estiver em **USD**, retorne **ambos**: "US$ X (AAAA) ≈ R$ Y – câmbio 5,0 BRL/USD – fonte: ...".
-  - Se **não** houver fonte direta, **estime** com critério explícito (receita/funcionário do setor × funcionários; comparação com pares; faixas de imprensa).
-- **erpatualouprovavel**: escolha entre { SAP S/4HANA, SAP ECC, SAP Business One, Oracle NetSuite, TOTVS Protheus, Senior, Sankhya, Omie, desenvolvimento próprio, outro ERP de nicho } com base em porte/segmento/notícias/ecossistema. Explique em **justificativaERP** de forma sucinta e factual.
-- **solucaofiscalouprovavel**: escolha entre { Thomson Reuters, Sovos, Solutio, Avalara, Guepardo, 4Tax, BPO fiscal, planilhas/house } com critério do motivo desta solução fiscal ser selecionada ou estimada (não esquecer de colocar o nome da solução fiscal),  em **criteriofiscal** (porte/ERP/segmento/custo/notícias).
-- **principaldordonegocio**: 1–2 frases sobre dores relevantes (ex.: eficiência operacional, compliance, escalabilidade, SLAs, omnichannel, prazos regulatórios).
-- **investimentoemti**: se houver benchmark setorial, use-o (cite o critério).
-  - Caso contrário, **2% do faturamento** (em **R$**). Se o faturamento estiver em USD, **converta** primeiro usando **câmbio 5,0 BRL/USD** e explique: "Critério: 2% de R$ {faturamento convertido}".
-  - Formato textual único (string), claro e auditável.
-- **ofensoremti**: 1 frase com a principal barreira interna ou externa, que dificulte o investimento em tecnologia (ex.: congelamento orçamentário, dívida técnica, backlog, CAPEX/OPEX).
-- **ultimas5noticias**: **5 itens** dos últimos **24 meses** **relacionados a crescimento, expansão, investimentos, tecnologia, M&A, parcerias, CAPEX/OPEX, resultados** — **evite** matérias opinativas/editoriais.
-  - Cada item: { "titulo", "data" (AAAA-MM-DD), "url", "resumo" (≤ 25 palavras) }.
-  - Itens **distintos** e de fontes confiáveis; evitar duplicatas; priorizar fatos que **sustentem investimento em TI**.
-- **modelodeemailti** e **modelodeemailfinanceiro**: **texto completo** com o formato:
-  "ASSUNTO: <linha>"
-  <linha em branco>
-  <corpo 2–4 parágrafos, 120–180 palavras(imaginando que sou de uma consultoria de TI e quero agendar uma reunião de 20 minutos), **personalizado** com nomedaempresa/segmento/uma ou mais notícias/“Compelling”/dor > 
-  <linha em branco>
-  "Atenciosamente,
-  [Seu Nome]
-  [Seu Telefone]"
-  - **Inclua CTA** claro para uma conversa de 20 minutos **esta semana**.
-- **Compelling**: 1–2 frases orientadas a ROI/risco/eficiência/prazo regulatório, conectadas às notícias/dor/faturamento, que juntas se transformem no Compelling para investimento em TI.
-- **gatilhocomercial**: 1–2 frases com time-to-value/urgência (janela regulatória, pico sazonal, corte de custos)que resultem em um gatilho comercial poderoso para instigar um possível investimento em tecnologia.
-- **organogramaclevel**: preencha nomes quando houver fonte; caso contrário deixe vazio, mas **tente** ao menos o CEO/CFO.
-  - Mantenha a chave "Cargo" **exatamente** com maiúscula (conforme o schema).
-- **powermap**: 3 itens: Decisor, Influenciador, Barreira. Use nomes reais quando possível com **justificativa** breve (fonte/indício). Se não houver, deixe nomes vazios mas mantenha as classificações.
-
-### Como buscar (sugestões)
-- Site institucional: "sobre", "quem somos", rodapé, "política de privacidade", "contato".
-- CNPJ: site institucional; se faltar, imprensa/cadastros; **confirme** razão social/endereço.
-- Mapa: "site:google.com/maps {razão social} {cidade}" (perfil oficial).
-- Funcionários: LinkedIn/press-kit/imprensa.
-- Notícias: "{razão social} (investimento OR expansão OR aquisição OR parceria OR captação OR data center OR ERP OR cloud OR compliance)".
-
-### Regras de saída
-- **Saída: SOMENTE o JSON final** (comece em "{" e termine em "}").
-- **Nunca** escreva “não encontrado”. Para factuais sem fonte após pesquisar, use "em verificação". Para estimáveis, **estime** com critério.
-- Preencha **todos** os campos; evite deixar strings vazias se houver base para estimar.
+- **cnpj**: CNPJ da **MATRIZ** no formato 00.000.000/0001-00.
+- **mapa**: URL do Google Maps da MATRIZ (não endereço textual).
+- **telefonepublico**: do site institucional ou do Google Maps.
+- **segmento / subsegmento**: concisos e coerentes.
+- **fundacao**: AAAA ou DD/MM/AAAA.
+- **localização**: Cidade/UF da MATRIZ.
+- **funcionarios**: real (com fonte) ou estimativa com critério.
+- **faturamento**: valor com ano e fonte (converter USD→BRL a 5,0 quando necessário).
+- **ERP/fiscal**: escolha provável com justificativa clara.
+- **notícias**: 5 itens (24m) com {titulo, data AAAA-MM-DD, url, resumo ≤ 25 palavras}.
+- **e-mails**: 120–180 palavras, personalizados, CTA 20 min.
+- **organogramaclevel**: tentar preencher; manter "Cargo" com maiúscula.
+- **powermap**: Decisor, Influenciador, Barreira com justificativas.
 `.trim();
 }
 
@@ -464,15 +361,7 @@ Preencha exatamente este JSON (mantenha os tipos de cada campo) — SAÍDA: **SO
 
 function buildRefineSystemMsg() {
   return `
-Você completa um **JSON existente**. Use **web_search** e preencha **todos** os campos vazios ou fracos seguindo os mesmos padrões de qualidade:
-
-- Notícias: 5 itens (24 meses) focados em crescimento/expansão/tecnologia/finanças, cada um com {titulo,data AAAA-MM-DD,url,resumo ≤ 25 palavras}.
-- "mapa": **URL do Google Maps da MATRIZ**, não endereço textual.
-- E-mails (TI/Financeiro): 120–180 palavras, personalizados com empresa/segmento/notícias/Compelling/dor, CTA de 20 minutos, e sem esquecer que este e-mail deve ser um e-mail de geração de demanda, em que o foco é conseguir 20 minutos da empresa em questão, para que o usuário deste PROMT possa apresentar sua empresa.
-- "investimentoemti": benchmark setorial; se ausente, **2% do faturamento em R$** (se faturamento estiver em USD, **converta com 5,0 BRL/USD**, explique e seja conservador).
-- ERP/fiscal: escolha provável com **critério** e justificativa clara do motivo dessas soluções serem plausíveis para essa empresa.
-- Para factuais sem fonte mesmo após buscar, use "em verificação". Para estimáveis, **preencha** com critério explícito.
-
+Você completa um **JSON existente**. Use **web_search** e preencha **todos** os campos vazios ou fracos seguindo os mesmos padrões de qualidade.
 ⚠️ Saída: **apenas** o JSON final, sem markdown, começando em "{" e terminando em "}".
 `.trim();
 }
@@ -485,13 +374,6 @@ ${prevJSON}
 Campos faltando/insuficientes: ${camposFaltando.join(", ")}
 
 Complete **todos** os campos acima **sem remover** dados já corretos. 
-Lembre-se de: 
-- manter "mapa" como URL do Google Maps da MATRIZ,
-- montar 5 notícias 100% ligadas a crescimento/expansão/tecnologia/finanças (não opinião),
-- produzir e-mails TI/Financeiro completos (120–180 palavras) imaginando que sou de uma consultoria de TI e desejo uma reunião de 20 minutos,
-- justificar estimativas (funcionários, faturamento, ERP, fiscal, investimentoemti),
-- converter USD→BRL a 5,0 quando necessário (explicando no texto de "faturamento" e no "investimentoemti").
-
 Saída: **somente** o JSON final.
 `.trim();
 }
@@ -564,7 +446,7 @@ app.post("/generate", async (req, res) => {
     }
 
     if (!missingOrWeak.length) {
-      // >>> Top3 antes de retornar (SEM alterações fora do escopo)
+      // >>> Top3 antes de retornar
       try {
         const { erp_top3, fiscal_top3 } = buildTop3(obj1);
         obj1.erp_top3 = erp_top3;
@@ -573,17 +455,17 @@ app.post("/generate", async (req, res) => {
         console.log("[scoring] erro:", e?.message || e);
       }
 
-      // >>> NOVO (somente Organograma/PowerMap via fontes públicas, sem LinkedIn)
+      // >>> ENRIQUECIMENTO ORGANOGRAMA/POWERMAP (só web_search; sem LinkedIn)
       try {
-        await rebuildOrgAndPowerMapFromPublicWeb(openai, obj1, site);
+        await enrichOrgPowermapWithWebSearch(site, obj1?.nomedaempresa, obj1);
       } catch (e) {
-        console.log("[/generate] aviso (early): falha ao reconstruir org/powermap público:", e?.message || e);
+        console.log("[/generate] aviso (early): falha org/powermap web:", e?.message || e);
       }
 
       return res.json(obj1);
     }
 
-    // ===== PASSO 2: REFINO DOS CAMPOS FALTANTES =====
+    // ===== PASSO 2: REFINO =====
     const systemMsg2 = buildRefineSystemMsg();
     const prevStr = JSON.stringify(obj1, null, 2);
     const prompt2  = buildRefineUserPrompt(prevStr, missingOrWeak);
@@ -632,7 +514,7 @@ app.post("/generate", async (req, res) => {
 
     const finalObj = { ...obj1, ...(obj2 || {}) };
 
-    // >>> Top3 (mantido)
+    // >>> Top3
     try {
       const { erp_top3, fiscal_top3 } = buildTop3(finalObj);
       finalObj.erp_top3 = erp_top3;
@@ -641,11 +523,11 @@ app.post("/generate", async (req, res) => {
       console.log('[scoring] falhou ao gerar top3:', e?.message || e);
     }
 
-    // >>> NOVO (somente Organograma/PowerMap via fontes públicas, sem LinkedIn)
+    // >>> ENRIQUECIMENTO ORGANOGRAMA/POWERMAP (só web_search; sem LinkedIn)
     try {
-      await rebuildOrgAndPowerMapFromPublicWeb(openai, finalObj, site);
+      await enrichOrgPowermapWithWebSearch(site, finalObj?.nomedaempresa, finalObj);
     } catch (e) {
-      console.log("[/generate] aviso: falha ao reconstruir org/powermap público:", e?.message || e);
+      console.log("[/generate] aviso: falha org/powermap web:", e?.message || e);
     }
 
     return res.json(finalObj);
