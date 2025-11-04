@@ -251,7 +251,6 @@ ${queryHints.map(q=>`- ${q}`).join("\n")}
       { role: "system", content: system },
       { role: "user", content: user }
     ],
-    temperature: 0,
     max_output_tokens: 1500
   };
 
@@ -443,7 +442,6 @@ app.post("/generate", async (req, res) => {
         { role: "system", content: systemMsg1 },
         { role: "user",   content: prompt1 }
       ],
-      temperature: 0,
       max_output_tokens: 4000
     };
 
@@ -466,7 +464,6 @@ app.post("/generate", async (req, res) => {
           { role: "user", content: raw1 }
         ],
         text: { format: { type: "json_object" } },
-        temperature: 0,
         max_output_tokens: 2000
       });
       const fixed = rehab.output_text || "{}";
@@ -525,7 +522,6 @@ app.post("/generate", async (req, res) => {
         { role: "system", content: systemMsg2 },
         { role: "user",   content: prompt2 }
       ],
-      temperature: 0,
       max_output_tokens: 5000
     };
 
@@ -549,7 +545,6 @@ app.post("/generate", async (req, res) => {
             { role: "user",   content: raw2 }
           ],
           text: { format: { type: "json_object" } },
-          temperature: 0,
           max_output_tokens: 3000
         });
         const fixed2 = rehab2.output_text || "{}";
@@ -589,3 +584,4 @@ app.post("/generate", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
+
