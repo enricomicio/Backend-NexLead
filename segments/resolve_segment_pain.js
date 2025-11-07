@@ -1,184 +1,233 @@
 // segments/resolve_segment_pain.js
+// Mapeia (segmento, subsegmento) → dor usando um score neutro, robusto e explicável.
+// Não requer mudanças no backend. Sem “foco” em segmentos específicos.
+
 const { SEGMENTOS, FALLBACK_DOR } = require("./segments_catalog");
 
-/** Utils de normalização */
-function norm(s = "") {
-  return String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-}
-function toTokens(s = "") {
-  return norm(s).split(/[^a-z0-9]+/).filter(Boolean);
-}
-function hasWholeWord(hay = "", word = "") {
-  if (!word) return false;
-  const w = norm(word).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const rx = new RegExp(`(?:^|\\b)${w}(?:\\b|$)`, "i");
-  return rx.test(norm(hay));
+// ===================== Helpers =====================
+function normalize(str = "") {
+  return String(str || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // tira acentos
+    .replace(/[^\w\s\/&-]/g, " ")    // limpa pontuação estranha
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-/** Índice alias->segmento (para match exato) */
-function buildAliasIndex(catalog) {
-  const idx = new Map();
-  for (const item of catalog) {
-    const seg = item.segmento;
-    const aliases = Array.isArray(item.aliases) ? item.aliases : [];
-    const all = [seg, ...aliases];
-    for (const a of all) {
-      const na = norm(a);
-      if (!na) continue;
-      if (!idx.has(na)) idx.set(na, new Set());
-      idx.get(na).add(seg);
-    }
+function tokenize(str = "") {
+  const n = normalize(str);
+  if (!n) return new Set();
+  return new Set(n.split(" ").filter(Boolean));
+}
+
+function hasWholeWord(hay, needle) {
+  const n = normalize(needle);
+  if (!n) return false;
+  const rx = new RegExp(`(^|\\b|\\s)${n}($|\\b|\\s)`);
+  return rx.test(hay);
+}
+
+function countHitsInTokens(tokensSet, list = []) {
+  let hits = 0;
+  for (const raw of list || []) {
+    const n = normalize(raw);
+    if (!n) continue;
+    if (tokensSet.has(n)) hits++;
   }
-  return idx;
+  return hits;
 }
 
-/** Pega item do catálogo pelo nome do segmento (normalizado) */
-function getByKey(catalog, key) {
-  const nk = norm(key);
-  return catalog.find(s => norm(s.segmento) === nk) || null;
-}
+// ===================== Scoring config (neutro) =====================
+// Ajustes conservadores (sem privilegiar setores):
+const CONF_THRESH_STRONG = 70; // mínimo para aceitar um match como “confiável”
+const GAP_MIN_DISAMBIG   = 12; // gap mínimo para declarar vencedor sem ambiguidade
 
-/** Calcula score de um segmento dado o texto (segmento+subsegmento) */
-function scoreSegment(item, inputTextTokens, subsegmentTextTokens) {
-  const aliases = Array.isArray(item.aliases) ? item.aliases : [];
-  const keywords = Array.isArray(item.keywords) ? item.keywords : []; // opcional (backward-compatible)
+const WEIGHTS = Object.freeze({
+  alias_strong: 90,   // alias bate como palavra inteira ou igualdade total
+  alias_partial: 45,  // alias aparece parcial no texto
+  kw_per_hit: 20,     // por keyword encontrada
+  kw_cap: 70,         // teto de pontos por keywords do segmento
+  sub_kw_per_hit: 22, // por keyword no subsegmento
+  sub_kw_cap: 66,     // teto por keywords no subsegmento
+  sub_alias_strong: 28,
+  sub_alias_partial: 14,
+  neg_per_hit: 45,    // penalidade por negativa
+  neg_cap: 135,
+  generic_penalty: 15 // penalidade leve para segmentos marcados como "generic"
+});
 
-  // Conjuntos
-  const aliasSet = new Set(aliases.map(a => norm(a)));
-  const keywSet  = new Set(keywords.map(k => norm(k)));
+function scoreOne(corpus, subCorpus, tokens, subTokens, item) {
+  const aliases = item.aliases || [];
+  const kws     = item.keywords || [];
+  const negs    = item.neg_keywords || [];
+  const generic = Boolean(item.generic);
 
-  // Tokens presentes
-  const inputSet = new Set(inputTextTokens);
-  const subSet   = new Set(subsegmentTextTokens);
-
-  // Pontuações base
   let score = 0;
-  let hitsAliases = 0;
-  let hitsKeywords = 0;
+  const reasons = [];
+  let positiveSignals = 0; // para saber se houve evidência positiva real
 
-  // 1) Nome do segmento (palavra inteira) vale mais
-  if (hasWholeWord(inputTextTokens.join(" "), item.segmento)) score += 32;
-
-  // 2) Aliases (palavra inteira)
-  for (const a of aliasSet) {
+  // ---- Aliases (segmento) ----
+  for (const a of aliases) {
     if (!a) continue;
-    if (hasWholeWord(inputTextTokens.join(" "), a)) {
-      score += 14;
-      hitsAliases++;
+    if (hasWholeWord(corpus, a) || corpus === normalize(a)) {
+      score += WEIGHTS.alias_strong;
+      reasons.push(`alias_strong:${a}`);
+      positiveSignals++;
+      // já tem um forte — não precisa somar outros aliases fortes
+      break;
+    } else if (corpus.includes(normalize(a))) {
+      score += WEIGHTS.alias_partial;
+      reasons.push(`alias_partial:${a}`);
+      positiveSignals++;
     }
   }
 
-  // 3) Keywords (se houver) — um pouco menos que alias
-  for (const k of keywSet) {
-    if (!k) continue;
-    if (hasWholeWord(inputTextTokens.join(" "), k)) {
-      score += 9;
-      hitsKeywords++;
+  // ---- Keywords (segmento) ----
+  const kwSeg = countHitsInTokens(tokens, kws);
+  if (kwSeg > 0) {
+    const pts = Math.min(kwSeg * WEIGHTS.kw_per_hit, WEIGHTS.kw_cap);
+    score += pts;
+    reasons.push(`kw_seg:${kwSeg}`);
+    positiveSignals += kwSeg;
+  }
+
+  // ---- Subsegmento: aliases + keywords ----
+  for (const a of aliases) {
+    if (!a) continue;
+    if (hasWholeWord(subCorpus, a) || subCorpus === normalize(a)) {
+      score += WEIGHTS.sub_alias_strong;
+      reasons.push(`sub_alias_strong:${a}`);
+      positiveSignals++;
+      break;
+    } else if (subCorpus.includes(normalize(a))) {
+      score += WEIGHTS.sub_alias_partial;
+      reasons.push(`sub_alias_partial:${a}`);
+      positiveSignals++;
     }
   }
 
-  // 4) Bônus se bater também no SUBSEGMENTO (ajuda muito a desambiguar)
-  //    (Ex.: "banco de investimentos", "varejo alimentar", "logística frigorificada")
-  let subBoost = 0;
-  if (subSet.size) {
-    // se algum alias do segmento aparece no subsegmento → +8 por ocorrência (cap em +16)
-    for (const a of aliasSet) {
-      if (a && hasWholeWord(subsegmentTextTokens.join(" "), a)) subBoost += 8;
-    }
-    // se alguma keyword aparece no subsegmento → +5 por ocorrência (cap em +15)
-    for (const k of keywSet) {
-      if (k && hasWholeWord(subsegmentTextTokens.join(" "), k)) subBoost += 5;
-    }
-    if (subBoost > 16) subBoost = 16;
-    score += subBoost;
+  const kwSub = countHitsInTokens(subTokens, kws);
+  if (kwSub > 0) {
+    const pts = Math.min(kwSub * WEIGHTS.sub_kw_per_hit, WEIGHTS.sub_kw_cap);
+    score += pts;
+    reasons.push(`kw_sub:${kwSub}`);
+    positiveSignals += kwSub;
   }
 
-  // 5) Penalidade por “generalidade”:
-  //    Se o segmento só pontuou por termos super genéricos (poucos hits + sem nome do segmento)
-  const usedName = hasWholeWord(inputTextTokens.join(" "), item.segmento);
-  const totalHits = hitsAliases + hitsKeywords + (usedName ? 1 : 0);
-  if (!usedName && totalHits <= 1) {
-    score -= 6; // leve
+  // ---- Negativas (segmento+sub) ----
+  const negSeg = countHitsInTokens(tokens, negs);
+  const negSub = countHitsInTokens(subTokens, negs);
+  const negHits = negSeg + negSub;
+  if (negHits > 0) {
+    const pen = Math.min(negHits * WEIGHTS.neg_per_hit, WEIGHTS.neg_cap);
+    score -= pen;
+    reasons.push(`neg:${negHits}`);
   }
 
-  // 6) Normalização por densidade:
-  //    Evita que um segmento com lista muito extensa de aliases ganhe “de graça”.
-  //    (Quanto mais aliases/keywords, maior o divisor — mas com limite mínimo)
-  const denom = Math.max(1, Math.sqrt(1 + aliases.length * 0.6 + keywords.length * 0.4));
-  const finalScore = Math.max(0, Math.round(score / denom));
+  // ---- Penalidade para "generic:true" (apenas se não houve alias forte)
+  const hadAliasStrong =
+    reasons.some(r => r.startsWith("alias_strong:")) ||
+    reasons.some(r => r.startsWith("sub_alias_strong:"));
+  if (generic && !hadAliasStrong) {
+    score -= WEIGHTS.generic_penalty;
+    reasons.push("generic_penalty");
+  }
 
-  return finalScore;
+  // ---- Confiança (0..100)
+  const confidence = Math.max(0, Math.min(100, score));
+
+  // Para evitar “acerto sem evidência”: se não houve nenhum sinal positivo, zera.
+  if (positiveSignals === 0) {
+    return { score: 0, reasons: reasons.concat("no_positive_signals") };
+  }
+
+  return { score: confidence, reasons };
 }
 
-/** Resolve o segmento por 3 etapas (exato -> score -> fallback) */
-function resolveSegmentByRules(segmentoRaw, subsegmentoRaw, catalog, debug = false) {
-  const inputRaw = `${segmentoRaw || ""}`.trim();
-  const subRaw   = `${subsegmentoRaw || ""}`.trim();
+// ===================== Público =====================
+function resolveSegmentPain(segmento, subsegmento) {
+  const corpus     = normalize(segmento || "");
+  const subCorpus  = normalize(subsegmento || "");
+  const tokens     = tokenize(corpus);
+  const subTokens  = tokenize(subCorpus);
 
-  // 1) EXATO por alias/nome
-  const aliasIndex = buildAliasIndex(catalog);
-  const entireText = `${inputRaw} ${subRaw}`.trim();
-  for (const [aliasNorm, keySet] of aliasIndex.entries()) {
-    if (!aliasNorm) continue;
-    if (hasWholeWord(entireText, aliasNorm)) {
-      const [first] = Array.from(keySet); // determinístico
-      const found = getByKey(catalog, first);
-      if (found) {
-        debug && console.log("[dor-offline] match exato:", found.segmento);
-        return { item: found, confidence: 95, via: "catalogo" };
-      }
-    }
-  }
+  // Calcula score para todos os candidatos
+  const ranked = SEGMENTOS.map((item) => {
+    const { score, reasons } = scoreOne(
+      corpus, subCorpus, tokens, subTokens, item
+    );
+    return { item, score, reasons };
+  }).sort((a, b) => b.score - a.score);
 
-  // 2) SCORING
-  const tokensInput = toTokens(entireText);
-  const tokensSub   = toTokens(subRaw);
+  const top = ranked[0] || null;
+  const second = ranked[1] || null;
 
-  let best = null;
-  let bestScore = -1;
-
-  for (const item of catalog) {
-    const sc = scoreSegment(item, tokensInput, tokensSub);
-    if (sc > bestScore) {
-      best = item;
-      bestScore = sc;
-    }
-  }
-
-  // Thresholds:
-  // >= 55 confiante; 40–54 aceitável; < 40 arriscado (cai para fallback)
-  if (best && bestScore >= 55) {
-    debug && console.log("[dor-offline] score forte:", best.segmento, "| score:", bestScore);
-    return { item: best, confidence: Math.min(99, bestScore), via: "catalogo" };
-  }
-  if (best && bestScore >= 40) {
-    debug && console.log("[dor-offline] score aceitável:", best.segmento, "| score:", bestScore);
-    return { item: best, confidence: bestScore, via: "catalogo" };
-  }
-
-  debug && console.log("[dor-offline] nenhum score suficiente (<=39) → fallback");
-  return { item: null, confidence: 0, via: "fallback" };
-}
-
-/** API principal (chamada pelo index.js) */
-function resolveSegmentPain(segmento, subsegmento, { debug = false } = {}) {
-  const { item, confidence, via } = resolveSegmentByRules(segmento, subsegmento, SEGMENTOS, debug);
-
-  if (item) {
+  // Sem candidato relevante
+  if (!top || top.score === 0) {
     return {
-      segmento_resolvido: item.segmento,
-      dor: item.dor,
-      via,
-      confidence
+      segmento_resolvido: "Generico",
+      dor: FALLBACK_DOR,
+      via: "fallback_sem_evidencia",
+      confidence: 0,
+      debug: ranked.slice(0, 5)
     };
   }
 
+  const gap = second ? top.score - second.score : top.score;
+
+  // Vence se: forte o suficiente e sem ambiguidade
+  if (top.score >= CONF_THRESH_STRONG && gap >= GAP_MIN_DISAMBIG) {
+    return {
+      segmento_resolvido: top.item.segmento,
+      dor: top.item.dor,
+      via: "match_confiante",
+      confidence: top.score,
+      debug: ranked.slice(0, 5)
+    };
+  }
+
+  // Desempate neutro por “positivos líquidos”
+  if (second) {
+    const posTop =
+      (top.reasons.filter(r => r.startsWith("alias_") || r.startsWith("kw_")).length);
+    const posSec =
+      (second.reasons.filter(r => r.startsWith("alias_") || r.startsWith("kw_")).length);
+
+    const negTop =
+      (top.reasons.filter(r => r.startsWith("neg:")).reduce((acc, r) => {
+        const m = r.match(/neg:(\d+)/); return acc + (m ? Number(m[1]) : 0);
+      }, 0));
+    const negSec =
+      (second.reasons.filter(r => r.startsWith("neg:")).reduce((acc, r) => {
+        const m = r.match(/neg:(\d+)/); return acc + (m ? Number(m[1]) : 0);
+      }, 0));
+
+    const netTop = posTop - negTop;
+    const netSec = posSec - negSec;
+
+    const winner = netTop > netSec ? top : (netSec > netTop ? second : top);
+
+    if (winner.score >= CONF_THRESH_STRONG) {
+      return {
+        segmento_resolvido: winner.item.segmento,
+        dor: winner.item.dor,
+        via: "match_desempatado_neutro",
+        confidence: winner.score,
+        debug: ranked.slice(0, 5)
+      };
+    }
+  }
+
+  // Ambíguo ou fraco → evita errar: usa fallback genérico
   return {
     segmento_resolvido: "Generico",
     dor: FALLBACK_DOR,
-    via: "fallback",
-    confidence: 20
+    via: "fallback_ambiguo_ou_fraco",
+    confidence: top.score,
+    debug: ranked.slice(0, 5)
   };
 }
 
 module.exports = { resolveSegmentPain };
+
