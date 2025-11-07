@@ -3,6 +3,8 @@ const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
 const { buildTop3 } = require("./scoring/scoring");
+// >>> DOR DO SEGMENTO (offline)
+const { resolveSegmentPain } = require("./segments/resolve_segment_pain");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -104,10 +106,6 @@ async function callOAIWithMaxToolCalls(oaiReq, maxToolCalls) {
 
 /* =======================================================================
    >>> ENRIQUECIMENTO SÓ COM web_search (sem LinkedIn) — ORGANOGRAMA/POWERMAP <<<
-   - Não altera prompts originais.
-   - Busca nomes/cargos em fontes que o web_search consegue abrir:
-     site institucional, imprensa, reguladores (CVM/B3), mídia econômica.
-   - Exige URL de fonte por pessoa; descarta sem fonte; ignora LinkedIn.
    ======================================================================= */
 function domainFromSite(site = "") {
   const host = String(site || "").toLowerCase().replace(/^https?:\/\//,'').split('/')[0] || "";
@@ -140,7 +138,6 @@ function isProbablyOkSource(url="") {
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
     if (isForbidden(url)) return false;
-    // aceitar site institucional e mídia/órgãos comuns
     return true;
   } catch { return false; }
 }
@@ -210,10 +207,9 @@ async function enrichOrgPowermapWithWebSearch(site, companyName, baseObj){
   const system = `
 Você é um agente que **usa web_search** e retorna **apenas JSON**.
 Objetivo: encontrar **nomes e cargos** (coordenador+ para cima) da empresa alvo **sem usar LinkedIn** (ignorar qualquer resultado de linkedin).
-Priorize: site institucional da empresa, páginas "liderança/governança/diretoria", sala de imprensa, CVM/B3, mídia econômica (Valor, Exame, NeoFeed, G1 Economia etc).
+Priorize: site institucional da empresa, páginas "liderança/governança/diretoria", sala de imprensa, CVM/B3, mídia econômica.
 Para **cada pessoa**, retorne também **"fonte" (URL)** exata onde o nome/cargo aparece.
-Máximo 6 pessoas úteis. Se aparecerem repetidas, mantenha a melhor fonte (institucional > mídia > outros).
-Saída: **somente** JSON.
+Máximo 6 pessoas úteis. Saída: JSON.
 `.trim();
 
   const queryHints = [
@@ -227,19 +223,10 @@ Saída: **somente** JSON.
 
   const user = `
 Empresa alvo: ${alvo}
-Gere um JSON **válido** no formato:
-{
-  "people": [
-    { "nome": "Nome Sobrenome", "cargo": "Cargo (ex.: CFO)", "fonte": "https://... (sem linkedin)" }
-  ]
-}
-
-Regras:
-- **NÃO** use LinkedIn (se aparecer, ignore).
-- **Obrigatório**: "fonte" com URL pública confiável.
-- Tente 4–6 pessoas.
-- Se a fonte trouxer só nome, mas a notícia/press room indicar o cargo, pode usar o cargo da notícia (e cite essa URL).
-Consultas sugeridas (você pode rodar variações com web_search):
+Formato:
+{ "people": [ { "nome": "Nome", "cargo": "Cargo", "fonte": "https://..." } ] }
+Regras: sem LinkedIn; 4–6 pessoas; sempre com fonte confiável (URL pública).
+Consultas sugeridas:
 ${queryHints.map(q=>`- ${q}`).join("\n")}
 `.trim();
 
@@ -262,7 +249,6 @@ ${queryHints.map(q=>`- ${q}`).join("\n")}
   const obj = sanitizeAndParse(resp.output_text || "");
   const arr = Array.isArray(obj?.people) ? obj.people : [];
 
-  // Sanitizar: remover fontes proibidas e obrigar nome+fonte
   const clean = [];
   for (const p of arr) {
     const nome  = String(p?.nome || "").trim();
@@ -276,7 +262,6 @@ ${queryHints.map(q=>`- ${q}`).join("\n")}
   console.log(`[org-web] pessoas úteis: ${clean.length}`);
   if (!clean.length) return baseObj;
 
-  // Montar organograma e powermap
   const org = mapPeopleToOrganograma(clean);
   const pm  = buildPowermapFromPeople(org, clean.slice(0,4));
 
@@ -289,59 +274,32 @@ ${queryHints.map(q=>`- ${q}`).join("\n")}
 // ===== PROMPTS =====
 function buildSystemMsg(site) {
   return `
-Você é um agente que retorna **APENAS** um **objeto JSON válido** (sem markdown, sem comentários, sem texto fora de { ... }).
+Você é um agente que retorna **APENAS** um **objeto JSON válido**.
 Você **PODE** usar web_search sempre que precisar de informação externa e deve continuar pesquisando enquanto houver campos vazios ou fracos.
 
-⚠️ TODOS os campos são **igualmente importantes** (CNPJ, funcionários, faturamento, modelos de e-mail, ERP, fiscal, notícias, etc.). Não priorize apenas dados legais.
+⚠️ TODOS os campos são importantes (CNPJ, funcionários, faturamento, e-mails, ERP, fiscal, notícias etc.).
 
 ### Padrões de qualidade por campo
-- **nomedaempresa**: razão social oficial da **MATRIZ** (se houver S/A, LTDA, etc., mantenha).
-- **cnpj**: CNPJ da **MATRIZ** no formato 00.000.000/0001-00 (fonte: site institucional, políticas legais, CVM, portal gov.br, perfis oficiais).
-- **mapa**: **URL clicável do perfil oficial no Google Maps** da MATRIZ (ex.: "https://www.google.com/maps/place/..."). **Não** retorne apenas endereço textual.
-- **telefonepublico**: telefone público do site institucional; se não houver, use o do perfil no Google Maps.
-- **segmento / subsegmento**: concisos e coerentes com a atuação principal (ex.: "Tecnologia / Provedores de conteúdo na internet").
-- **fundacao**: ano (AAAA) ou data completa (DD/MM/AAAA) se constar oficialmente.
-- **localização**: Cidade/UF da MATRIZ (ex.: "São Paulo, SP").
-- **funcionarios**: real (com fonte). Se não houver, **estime** com critério claro (ex.: LinkedIn, notícias, porte; formato sugerido: "1.001–5.000 (estimativa — critério: headcount LinkedIn)").
-- **faturamento**: se houver valor confiável, retorne "R$ X/ano (AAAA) – fonte: ...".
-  - Se a fonte estiver em **USD**, retorne **ambos**: "US$ X (AAAA) ≈ R$ Y – câmbio 5,0 BRL/USD – fonte: ...".
-  - Se **não** houver fonte direta, **estime** com critério explícito (receita/funcionário do setor × funcionários; comparação com pares; faixas de imprensa).
-- **erpatualouprovavel**: escolha entre { SAP S/4HANA, SAP ECC, SAP Business One, Oracle NetSuite, TOTVS Protheus, Senior, Sankhya, Omie, desenvolvimento próprio, outro ERP de nicho } com base em porte/segmento/notícias/ecossistema. Explique em **justificativaERP** de forma sucinta e factual.
-- **solucaofiscalouprovavel**: escolha entre { Thomson Reuters, Sovos, Solutio, Avalara, Guepardo, 4Tax, BPO fiscal, planilhas/house } com critério do motivo desta solução fiscal ser selecionada ou estimada (não esquecer de colocar o nome da solução fiscal),  em **criteriofiscal** (porte/ERP/segmento/custo/notícias).
-- **principaldordonegocio**: 1–2 frases sobre dores relevantes (ex.: eficiência operacional, compliance, escalabilidade, SLAs, omnichannel, prazos regulatórios).
-- **investimentoemti**: se houver benchmark setorial, use-o (cite o critério).
-  - Caso contrário, **2% do faturamento** (em **R$**). Se o faturamento estiver em USD, **converta** primeiro usando **câmbio 5,0 BRL/USD** e explique: "Critério: 2% de R$ {faturamento convertido}".
-  - Formato textual único (string), claro e auditável.
-- **ofensoremti**: 1 frase com a principal barreira interna ou externa, que dificulte o investimento em tecnologia (ex.: congelamento orçamentário, dívida técnica, backlog, CAPEX/OPEX).
-- **ultimas5noticias**: **5 itens** dos últimos **24 meses** **relacionados a crescimento, expansão, investimentos, tecnologia, M&A, parcerias, CAPEX/OPEX, resultados** — **evite** matérias opinativas/editoriais.
-  - Cada item: { "titulo", "data" (AAAA-MM-DD), "url", "resumo" (≤ 25 palavras) }.
-  - Itens **distintos** e de fontes confiáveis; evitar duplicatas; priorizar fatos que **sustentem investimento em TI**.
-- **modelodeemailti** e **modelodeemailfinanceiro**: **texto completo** com o formato:
-  "ASSUNTO: <linha>"
-  <linha em branco>
-  <corpo 2–4 parágrafos, 120–180 palavras(imaginando que sou de uma consultoria de TI e quero agendar uma reunião de 20 minutos), **personalizado** com nomedaempresa/segmento/uma ou mais notícias/“Compelling”/dor > 
-  <linha em branco>
-  "Atenciosamente,
-  [Seu Nome]
-  [Seu Telefone]"
-  - **Inclua CTA** claro para uma conversa de 20 minutos **esta semana**.
-- **Compelling**: 1–2 frases orientadas a ROI/risco/eficiência/prazo regulatório, conectadas às notícias/dor/faturamento, que juntas se transformem no Compelling para investimento em TI.
-- **gatilhocomercial**: 1–2 frases com time-to-value/urgência (janela regulatória, pico sazonal, corte de custos)que resultem em um gatilho comercial poderoso para instigar um possível investimento em tecnologia.
-- **organogramaclevel**: preencha nomes quando houver fonte; caso contrário deixe vazio, mas **tente** ao menos o CEO/CFO.
-  - Mantenha a chave "Cargo" **exatamente** com maiúscula (conforme o schema).
-- **powermap**: 3 itens: Decisor, Influenciador, Barreira. Use nomes reais quando possível com **justificativa** breve (fonte/indício). Se não houver, deixe nomes vazios mas mantenha as classificações.
+- nomedaempresa: razão social da MATRIZ.
+- cnpj: CNPJ da MATRIZ no formato 00.000.000/0001-00.
+- mapa: URL do Google Maps da MATRIZ.
+- telefonepublico: do site institucional (ou Maps).
+- segmento/subsegmento: concisos e coerentes.
+- fundacao: AAAA ou data completa.
+- localização: Cidade/UF da MATRIZ.
+- funcionarios: real (com fonte); se não houver, estimar com critério.
+- faturamento: valor e fonte; se USD, converter (5,0 BRL/USD) e citar.
+- erpatualouprovavel + justificativaERP: seleção e justificativa sucinta.
+- solucaofiscalouprovavel + criteriofiscal: seleção e critério.
+- principaldordonegocio: **(será definido offline no backend)**.
+- investimentoemti: benchmark; se ausente, 2% do faturamento em R$ (explicar).
+- ofensoremti: 1 frase objetiva.
+- ultimas5noticias: 5 itens (24 meses) com {titulo,data,url,resumo≤25 palavras}.
+- e-mails (TI/Financeiro): 120–180 palavras, personalizados, CTA 20 minutos.
+- Compelling/gatilho comercial: 1–2 frases cada.
+- organogramaclevel/powermap: nomes quando houver fonte; caso contrário, vazio.
 
-### Como buscar (sugestões)
-- Site institucional: "sobre", "quem somos", rodapé, "política de privacidade", "contato".
-- CNPJ: site institucional; se faltar, imprensa/cadastros; **confirme** razão social/endereço.
-- Mapa: "site:google.com/maps {razão social} {cidade}" (perfil oficial).
-- Funcionários: LinkedIn/press-kit/imprensa.
-- Notícias: "{razão social} (investimento OR expansão OR aquisição OR parceria OR captação OR data center OR ERP OR cloud OR compliance)".
-
-### Regras de saída
-- **Saída: SOMENTE o JSON final** (comece em "{" e termine em "}").
-- **Nunca** escreva “não encontrado”. Para factuais sem fonte após pesquisar, use "em verificação". Para estimáveis, **estime** com critério.
-- Preencha **todos** os campos; evite deixar strings vazias se houver base para estimar.
+Saída: SOMENTE o JSON final.
 `.trim();
 }
 
@@ -349,7 +307,7 @@ function buildUserPrompt(site) {
   return `
 Site informado: ${site}
 
-Preencha exatamente este JSON (mantenha os tipos de cada campo) — SAÍDA: **SOMENTE** o JSON (comece em "{" e termine em "}"):
+Preencha exatamente este JSON — SAÍDA: SOMENTE o JSON:
 
 {
   "nomedaempresa": "",
@@ -392,35 +350,35 @@ Preencha exatamente este JSON (mantenha os tipos de cada campo) — SAÍDA: **SO
 
 function buildRefineSystemMsg() {
   return `
-Você completa um **JSON existente**. Use **web_search** e preencha **todos** os campos vazios ou fracos seguindo os mesmos padrões de qualidade:
+Você completa um JSON existente. Use web_search e preencha campos vazios/fracos.
+Lembretes:
+- notícias: 5 itens (24 meses) {titulo,data,url,resumo ≤25}.
+- mapa: URL do Google Maps da MATRIZ.
+- e-mails: 120–180 palavras + CTA 20 minutos.
+- investimentoemti: benchmark; senão, 2% do faturamento em R$ (explique).
+- ERP/fiscal: escolha provável com critério.
+- principaldordonegocio: **ignorar — será definido offline no backend**.
 
-- Notícias: 5 itens (24 meses) focados em crescimento/expansão/tecnologia/finanças, cada um com {titulo,data AAAA-MM-DD,url,resumo ≤ 25 palavras}.
-- "mapa": **URL do Google Maps da MATRIZ**, não endereço textual.
-- E-mails (TI/Financeiro): 120–180 palavras, personalizados com empresa/segmento/notícias/Compelling/dor, CTA de 20 minutos, e sem esquecer que este e-mail deve ser um e-mail de geração de demanda, em que o foco é conseguir 20 minutos da empresa em questão, para que o usuário deste PROMT possa apresentar sua empresa.
-- "investimentoemti": benchmark setorial; se ausente, **2% do faturamento em R$** (se faturamento estiver em USD, **converta com 5,0 BRL/USD**, explique e seja conservador).
-- ERP/fiscal: escolha provável com **critério** e justificativa clara do motivo dessas soluções serem plausíveis para essa empresa.
-- Para factuais sem fonte mesmo após buscar, use "em verificação". Para estimáveis, **preencha** com critério explícito.
-
-⚠️ Saída: **apenas** o JSON final, sem markdown, começando em "{" e terminando em "}".
+Saída: apenas o JSON final.
 `.trim();
 }
 
 function buildRefineUserPrompt(prevJSON, camposFaltando) {
   return `
-JSON parcial atual (com campos vazios ou fracos):
+JSON parcial atual:
 ${prevJSON}
 
 Campos faltando/insuficientes: ${camposFaltando.join(", ")}
 
-Complete **todos** os campos acima **sem remover** dados já corretos. 
-Lembre-se de: 
-- manter "mapa" como URL do Google Maps da MATRIZ,
-- montar 5 notícias 100% ligadas a crescimento/expansão/tecnologia/finanças (não opinião),
-- produzir e-mails TI/Financeiro completos (120–180 palavras) imaginando que sou de uma consultoria de TI e desejo uma reunião de 20 minutos,
-- justificar estimativas (funcionários, faturamento, ERP, fiscal, investimentoemti),
-- converter USD→BRL a 5,0 quando necessário (explicando no texto de "faturamento" e no "investimentoemti").
+Complete sem remover dados corretos. Lembre-se:
+- "mapa" = URL do Google Maps;
+- 5 notícias objetivas (24 meses);
+- e-mails TI/Financeiro completos (120–180 palavras);
+- justificar estimativas (funcionários, faturamento, ERP, fiscal, investimentoemti);
+- converter USD→BRL a 5,0 quando necessário.
+- "principaldordonegocio": será definido offline no backend.
 
-Saída: **somente** o JSON final.
+Saída: somente o JSON final.
 `.trim();
 }
 
@@ -489,8 +447,20 @@ app.post("/generate", async (req, res) => {
       if (Array.isArray(v) && v.length === 0) { missingOrWeak.push(k); continue; }
     }
 
+    // ⚠️ Não deixe o PASSO 2 rodar por causa da dor (que é OFFLINE)
+    const idxDor = missingOrWeak.indexOf("principaldordonegocio");
+    if (idxDor !== -1) missingOrWeak.splice(idxDor, 1);
+
+    // >>> DOR DO SEGMENTO (offline) — SEMPRE sobrescreve
+    try {
+      const { dor } = resolveSegmentPain(obj1.segmento, obj1.subsegmento);
+      obj1.principaldordonegocio = dor;
+    } catch (e) {
+      console.log("[dor-offline] aviso: falha ao resolver dor no PASSO 1:", e?.message || e);
+    }
+
     if (!missingOrWeak.length) {
-      // >>> NOVO: top3 antes de retornar
+      // >>> TOP3
       try {
         const { erp_top3, fiscal_top3 } = buildTop3(obj1);
         obj1.erp_top3 = erp_top3;
@@ -499,7 +469,7 @@ app.post("/generate", async (req, res) => {
         console.log("[scoring] erro:", e?.message || e);
       }
 
-      // >>> ENRIQUECIMENTO ORGANOGRAMA/POWERMAP (somente este ponto foi adicionado)
+      // >>> ORGANOGRAMA/POWERMAP via web_search
       try {
         await enrichOrgPowermapWithWebSearch(site, obj1?.nomedaempresa, obj1);
       } catch (e) {
@@ -556,7 +526,15 @@ app.post("/generate", async (req, res) => {
 
     const finalObj = { ...obj1, ...(obj2 || {}) };
 
-    // >>> NOVO: calcula e anexa Top 3 de ERP e Fiscal
+    // >>> DOR DO SEGMENTO (offline) — sobrescreve novamente no final
+    try {
+      const { dor } = resolveSegmentPain(finalObj.segmento, finalObj.subsegmento);
+      finalObj.principaldordonegocio = dor;
+    } catch (e) {
+      console.log("[dor-offline] aviso: falha ao resolver dor no PASSO 2:", e?.message || e);
+    }
+
+    // >>> TOP3
     try {
       const { erp_top3, fiscal_top3 } = buildTop3(finalObj);
       finalObj.erp_top3 = erp_top3;
@@ -565,7 +543,7 @@ app.post("/generate", async (req, res) => {
       console.log('[scoring] falhou ao gerar top3:', e?.message || e);
     }
 
-    // >>> ENRIQUECIMENTO ORGANOGRAMA/POWERMAP (somente este ponto foi adicionado)
+    // >>> ORGANOGRAMA/POWERMAP via web_search
     try {
       await enrichOrgPowermapWithWebSearch(site, finalObj?.nomedaempresa, finalObj);
     } catch (e) {
